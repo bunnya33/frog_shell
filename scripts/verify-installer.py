@@ -132,20 +132,25 @@ def smoke(setup, portable, version, manifest):
         result = subprocess.run(cmd, timeout=180, capture_output=True)
         require(result.returncode == 0, f'Installer exit code {result.returncode}')
         installed = install / 'FrogShell.exe'
-        require(installed.is_file() and digest(installed) == digest(portable), 'Installed payload differs from portable')
+        portable_sha256 = digest(portable)
+        require(installed.is_file() and digest(installed) == portable_sha256, 'Installed payload differs from portable')
         require(existing_registration(), 'Expected uninstall entry is missing')
+        from portable_isolation import Sandbox, OwnedProcess, snapshot
+        installed_before = snapshot(install)
         result = subprocess.run([str(installed), '--version'], env=env, cwd=str(install), capture_output=True, timeout=60)
         output = result.stdout.decode(errors='replace').strip()
         require(result.returncode == 0 and f'FrogShell {version}' in output, f'Installed version failed: {output}')
         # Reuse the portable test's Windows job ownership and isolated profile for real Qt startup.
-        from portable_isolation import Sandbox, OwnedProcess
         metadata = json.loads(manifest.read_text(encoding='utf-8'))
         require(metadata['version'] == version, 'Payload manifest version mismatch')
         box = Sandbox(root, 'installed-app', installed, metadata)
-        box.exe = installed
+        require(installed.resolve(strict=True).parent == install.resolve(strict=True) and installed != box.exe,
+                'Startup executable must be the installed launcher, not the sandbox copy')
         startup = []
         for name, options in (('manager', []), ('demo', ['--demo'])):
-            with OwnedProcess(box, name, box.args(*options)) as process:
+            require(digest(installed) == portable_sha256 and snapshot(install) == installed_before,
+                    f'Installed files changed before {name} startup')
+            with OwnedProcess(box, name, box.args(*options), executable=installed) as process:
                 deadline = time.monotonic() + 20
                 while len(process.pids()) < 2 and time.monotonic() < deadline:
                     process.sample()
@@ -153,11 +158,16 @@ def smoke(setup, portable, version, manifest):
                 require(len(process.pids()) == 2, f'{name} Qt child missing')
                 time.sleep(.6)
                 require(len(process.pids()) == 2, f'{name} exited early')
+                sample = process.sample()
+                require(any(item['pid'] == process.pid and Path(item['image']).resolve() == installed.resolve()
+                            for item in sample), f'{name} did not run the installed launcher')
                 process.stop_child(73)
                 outcome = process.wait()
                 require(outcome['exit_code'] == 73, f'{name} launcher exit mismatch')
                 startup.append(name)
             box.validate_cache()
+            require(digest(installed) == portable_sha256 and snapshot(install) == installed_before,
+                    f'Installed files changed during {name} startup')
         app_sentinel = install / 'unknown-user-file.txt'
         app_sentinel.write_text('preserve', encoding='utf-8')
         uninstaller = install / 'unins000.exe'
@@ -172,9 +182,10 @@ def smoke(setup, portable, version, manifest):
         require(not existing_registration(), 'Uninstall registration remains')
         require(all(p.read_text(encoding='utf-8') == 'preserve' for p in sentinels), 'Profile data was changed')
         require(app_sentinel.read_text(encoding='utf-8') == 'preserve', 'Unknown installation file was changed')
-        return {'installed_sha256': digest(portable), 'version_output': output, 'uninstall_exit': result.returncode,
+        return {'installed_sha256': portable_sha256, 'version_output': output, 'uninstall_exit': result.returncode,
                 'profile_sentinels_preserved': len(sentinels), 'unknown_install_file_preserved': True,
-                'offscreen_startup': startup}
+                'offscreen_startup': startup, 'installed_launcher_verified': True,
+                'installation_snapshot_unchanged': True}
 
 
 def main():

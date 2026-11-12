@@ -133,7 +133,7 @@ class Sandbox:
 
 
 class OwnedProcess:
-    def __init__(self, sandbox, name, arguments, raw_tail=None, extra_env=None):
+    def __init__(self, sandbox, name, arguments, raw_tail=None, extra_env=None, executable=None):
         import msvcrt
         self.sandbox, self.name = sandbox, name
         self.started = time.perf_counter()
@@ -148,7 +148,8 @@ class OwnedProcess:
         try:
             checked(KERNEL.SetInformationJobObject(self.job, 9, ctypes.byref(limits), ctypes.sizeof(limits)))
             self.raw_tail = raw_tail if raw_tail is not None else " " + subprocess.list2cmdline(arguments)
-            command = ctypes.create_unicode_buffer('"' + str(sandbox.exe) + '"' + self.raw_tail)
+            executable = sandbox.exe if executable is None else executable
+            command = ctypes.create_unicode_buffer('"' + str(executable) + '"' + self.raw_tail)
             env = dict(sandbox.env)
             env.update(extra_env or {})
             block = ctypes.create_unicode_buffer("\0".join(key + "=" + value for key, value in sorted(env.items(), key=lambda pair: pair[0].upper())) + "\0\0")
@@ -160,7 +161,7 @@ class OwnedProcess:
                 for handle in handles:
                     os.set_handle_inheritable(handle, True)
                 startup.stdin, startup.stdout, startup.stderr = handles
-                checked(KERNEL.CreateProcessW(str(sandbox.exe), command, None, None, True,
+                checked(KERNEL.CreateProcessW(str(executable), command, None, None, True,
                                                0x4 | 0x400 | 0x08000000, block, str(sandbox.download),
                                                ctypes.byref(startup), ctypes.byref(process)))
                 self.process, self.pid = process.process, process.pid

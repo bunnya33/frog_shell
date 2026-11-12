@@ -98,13 +98,34 @@ jobs:
           "INNO_COMPILER=$compiler" >> $env:GITHUB_ENV
       - name: Build and verify installer
         shell: pwsh
+        env:
+          HARNESS_COMMIT: ${{ github.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
           $portable = "dist/FrogShell-$env:RELEASE_VERSION-portable.exe"
           $setup = "dist/FrogShell-$env:RELEASE_VERSION-setup.exe"
           ./scripts/package-installer-windows.ps1 -Version $env:RELEASE_VERSION -PortableExe $portable -ExpectedSha256 $env:PORTABLE_SHA256 -Compiler $env:INNO_COMPILER
+          if ($LASTEXITCODE) { throw 'Installer packaging failed' }
+          # Only after packaging, obtain the workflow revision's test harness without changing the tag checkout.
+          if ($env:HARNESS_COMMIT -cnotmatch '^[0-9a-f]{40}$') { throw 'Invalid workflow revision SHA' }
+          $tagCommit = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -or $tagCommit -cnotmatch '^[0-9a-f]{40}$') { throw 'Invalid tag checkout commit' }
+          git fetch --no-tags origin $env:HARNESS_COMMIT
+          if ($LASTEXITCODE) { throw 'Could not fetch workflow revision' }
+          python -c "import os,subprocess; from pathlib import Path; sha=os.environ['HARNESS_COMMIT']; paths=('scripts/verify-installer.py','scripts/portable_isolation.py'); [(Path(p).write_bytes(subprocess.check_output(['git','show',sha+':'+p]))) for p in paths]"
+          if ($LASTEXITCODE) { throw 'Could not extract test harness' }
+          Write-Host "Test harness commit: $env:HARNESS_COMMIT; tag checkout commit: $tagCommit"
+          $harnessHashes = [ordered]@{}
+          foreach ($path in @('scripts/verify-installer.py', 'scripts/portable_isolation.py')) {
+            $harnessHashes[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
           python scripts/verify-installer.py --setup $setup --portable $portable --version $env:RELEASE_VERSION --expected-sha256 $env:PORTABLE_SHA256 --ci-smoke --manifest "build/portable-$env:RELEASE_VERSION/generated/payload-manifest.json" --report build/installer-smoke/installer-smoke.json
           if ($LASTEXITCODE) { throw 'Installer verification failed' }
+          foreach ($path in $harnessHashes.Keys) {
+            if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $harnessHashes[$path]) { throw "Test harness changed during verification: $path" }
+          }
+          [ordered]@{ workflow_revision_commit = $env:HARNESS_COMMIT; tag_checkout_commit = $tagCommit; script_sha256 = $harnessHashes } |
+            ConvertTo-Json -Depth 3 | Set-Content build/installer-smoke/test-harness.json -Encoding utf8NoBOM
           $names = @("FrogShell-$env:RELEASE_VERSION-portable.exe", "FrogShell-$env:RELEASE_VERSION-setup.exe")
           $lines = foreach ($name in $names) { "$( (Get-FileHash -LiteralPath "dist/$name" -Algorithm SHA256).Hash.ToLowerInvariant() )  $name" }
           $lines | Set-Content dist/SHA256SUMS -Encoding utf8NoBOM
