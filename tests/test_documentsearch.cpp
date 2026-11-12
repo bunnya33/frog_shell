@@ -93,6 +93,9 @@ class DocumentSearchTests : public QObject {
         bool hasAdvanced=false,hasFind=false;underline=false;for(const auto &s:a->code->extraSelections()){
             hasAdvanced|=s.cursor.selectedText()==QString("修复");hasFind|=s.cursor.selectedText()==QString("unique");underline|=s.format.underlineStyle()==QTextCharFormat::WaveUnderline;
         }QVERIFY(hasAdvanced&&hasFind&&underline);QCOMPARE(a->code->toPlainText(),text);
+        controller.activateResult(0);QCOMPARE(a->code->textCursor().selectedText(),QString("修复"));
+        find->clear();QCOMPARE(a->code->textCursor().selectedText(),QString("修复"));underline=false;for(const auto &s:a->code->extraSelections())underline|=s.format.underlineStyle()==QTextCharFormat::WaveUnderline;QVERIFY(underline);
+        workspace->closePage(controller.results());underline=false;for(const auto &s:a->code->extraSelections())underline|=s.format.underlineStyle()==QTextCharFormat::WaveUnderline;QVERIFY(underline);
     }
     void sourceStableAndSingleContainer(){
         QMainWindow main;auto workspace=new Workspace(profile(),{},true);main.setCentralWidget(workspace);auto a=add(*workspace,"/test/warning.log",sample()),b=add(*workspace,"/test/server.js","get gateway error B");
@@ -104,6 +107,53 @@ class DocumentSearchTests : public QObject {
         controller.setDetached(false);QVERIFY(!controller.isDetached());QCOMPARE(controller.results(),panel);QCOMPARE(workspace->editArea->groupFor(panel)!=nullptr,true);
         QSignalSpy activated(&controller,&DocumentSearchController::resultActivated);controller.activateResult(2);QCOMPARE(activated.count(),1);QCOMPARE(workspace->editArea->activeGroup()->currentWidget(),a);QCOMPARE(a->code->textCursor().blockNumber(),3);
         QVERIFY(controller.openFor(workspace,b));query(controller,"get gateway error");QTRY_COMPARE(finished.count(),2);QCOMPARE(controller.resultSource().path,b->path);QCOMPARE(controller.results(),panel);QCOMPARE(panel->outcome().matchCount,1);
+    }
+    void lastSearchResultControlsBottomPanel(){
+        QMainWindow main; auto workspace=new Workspace(profile("search-last-result"),{},false);
+        workspace->demo=true; main.setCentralWidget(workspace); main.resize(1000,700); main.show(); settle();
+        auto editor=add(*workspace,"/test/last.txt",sample());
+        DocumentSearchController controller(&main); controller.registerWorkspace(workspace);
+        QVERIFY(controller.openFor(workspace,editor)); QSignalSpy finished(&controller,&DocumentSearchController::searchFinished);
+        query(controller,"relay internal"); QTRY_COMPARE(finished.count(),1); QVERIFY(finished.last().first().toBool());
+        auto result=controller.results(); QVERIFY(workspace->groupFor(result));
+        workspace->closePage(editor); settle(); QVERIFY(!workspace->terminalMaximized);
+        controller.setDetached(true); settle(); QVERIFY(workspace->terminalMaximized);
+        controller.setDetached(false); QVERIFY(!workspace->terminalMaximized);
+        workspace->closePage(result); settle(); QVERIFY(workspace->terminalMaximized);
+        controller.showResults(); QVERIFY(!workspace->terminalMaximized); QVERIFY(workspace->groupFor(result));
+    }
+    void searchHighlightLifecycleKeepsResultsAndManualSelection(){
+        QMainWindow main;auto workspace=new Workspace(profile("search-lifecycle"),{},true);main.setCentralWidget(workspace);
+        auto editor=add(*workspace,"/test/lifecycle.txt",sample());DocumentSearchController controller(&main);controller.registerWorkspace(workspace);main.resize(1000,700);main.show();
+        QVERIFY(controller.openFor(workspace,editor));QSignalSpy done(&controller,&DocumentSearchController::searchFinished);
+        query(controller,"get gateway error");QTRY_COMPARE(done.count(),1);QVERIFY(done.last().first().toBool());QVERIFY(!tokens(editor->code).isEmpty());
+        controller.parameters()->hide();QVERIFY(!tokens(editor->code).isEmpty()); // Automatic hiding is not cancellation.
+        controller.activateResult(0);QVERIFY(editor->code->textCursor().hasSelection());
+        workspace->closePage(controller.results());QVERIFY(tokens(editor->code).isEmpty());QVERIFY(!editor->code->textCursor().hasSelection());
+        QCOMPARE(controller.results()->outcome().matchCount,4);QCOMPARE(controller.resultSource().path,editor->path);
+        controller.showResults();controller.activateResult(0);QVERIFY(editor->code->textCursor().hasSelection());QVERIFY(!tokens(editor->code).isEmpty());
+        QTextCursor manual(editor->code->document());manual.setPosition(0);manual.setPosition(3,QTextCursor::KeepAnchor);editor->code->setTextCursor(manual);
+        controller.setDetached(true);controller.results()->window()->close();QCOMPARE(editor->code->textCursor(),manual);QVERIFY(tokens(editor->code).isEmpty());
+        controller.showResults();controller.activateResult(0);QVERIFY(controller.openFor(workspace,editor));
+        auto input=controller.parameters()->findChild<QLineEdit *>("advancedSearchQuery");input->clear();QVERIFY(tokens(editor->code).isEmpty());QVERIFY(!editor->code->textCursor().hasSelection());
+        query(controller,"relay internal");QTRY_COMPARE(done.count(),2);controller.activateResult(0);QVERIFY(editor->code->textCursor().hasSelection());
+        controller.parameters()->reject();QVERIFY(tokens(editor->code).isEmpty());QVERIFY(!editor->code->textCursor().hasSelection());QCOMPARE(controller.results()->outcome().matchCount,1);
+        qputenv("RABBITSHELL_TEST_STALL_SEARCH","1");auto reset=qScopeGuard([]{qunsetenv("RABBITSHELL_TEST_STALL_SEARCH");});
+        QVERIFY(controller.openFor(workspace,editor));query(controller,"gateway");QVERIFY(controller.searching());input->clear();QVERIFY(!controller.searching());QTest::qWait(200);QCOMPARE(done.count(),2);QCOMPARE(controller.results()->outcome().matchCount,1);
+    }
+    void pendingActivationCancelled_data(){QTest::addColumn<bool>("clearQuery");QTest::newRow("clear-query")<<true;QTest::newRow("reject-dialog")<<false;}
+    void pendingActivationCancelled(){
+        QFETCH(bool,clearQuery);QMainWindow main;auto workspace=new Workspace(profile("pending-cancel"),{},true);main.setCentralWidget(workspace);
+        auto original=add(*workspace,"/test/pending.txt",sample());DocumentSearchController controller(&main);controller.registerWorkspace(workspace);main.show();
+        QVERIFY(controller.openFor(workspace,original));QSignalSpy done(&controller,&DocumentSearchController::searchFinished);query(controller,"get gateway error");QTRY_COMPARE(done.count(),1);
+        workspace->editors.remove(original->path);workspace->editArea->removePage(original);delete original;settle();
+        // Offline reopen stays pending until the fixture source is delivered.
+        controller.activateResult(0);
+        if(clearQuery)controller.parameters()->findChild<QLineEdit *>("advancedSearchQuery")->clear();else controller.parameters()->reject();
+        QCOMPARE(controller.results()->outcome().matchCount,4);
+        auto reopened=add(*workspace,"/test/pending.txt",sample());QSignalSpy activated(&controller,&DocumentSearchController::resultActivated);
+        emit workspace->stateChanged();QCOMPARE(activated.count(),0);QVERIFY(tokens(reopened->code).isEmpty());
+        controller.activateResult(0);QCOMPARE(activated.count(),1);QVERIFY(reopened->code->textCursor().hasSelection());QCOMPARE(controller.resultSource().path,reopened->path);
     }
     void anchorsStaleAndReopenDoNotRestoreDiscardedDraft(){
         QMainWindow main;auto workspace=new Workspace(profile("anchors"),{},true);main.setCentralWidget(workspace);auto a=add(*workspace,"/test/a.txt",sample());DocumentSearchController controller(&main);controller.registerWorkspace(workspace);main.show();

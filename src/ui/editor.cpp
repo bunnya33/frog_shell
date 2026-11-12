@@ -169,6 +169,8 @@ CodeEdit::CodeEdit(QWidget *p) : QPlainTextEdit(p) {
     updateGutter();
     auto cursorChanged = [this] {
         if (locatingMatch) return;
+        selectionOwner = SelectionOwner::None;
+        ownedSelection = {};
         if (searchSelection) {
             searchSelection = false;
             updateHighlights();
@@ -346,12 +348,20 @@ void CodeEdit::closeFind() {
     if (findPanel) findPanel->hide();
     if (findTimer) findTimer->stop();
     ++findRevision;
+    clearOwnedSelection(SelectionOwner::Find);
     currentMatch = -1;
     matches.clear();
     searchSelection = false;
     updateHighlights();
 }
-void CodeEdit::scheduleFind(){++findRevision;currentMatch=-1;matches.clear();searchSelection=false;updateHighlights();if(findTimer)findTimer->start();}
+void CodeEdit::scheduleFind(){++findRevision;clearOwnedSelection(SelectionOwner::Find);currentMatch=-1;matches.clear();searchSelection=false;updateHighlights();if(query&&query->text().isEmpty()){if(findTimer)findTimer->stop();if(findStatus)findStatus->clear();return;}if(findTimer)findTimer->start();}
+void CodeEdit::clearOwnedSelection(SelectionOwner owner) {
+    if (selectionOwner != owner) return;
+    const auto current = textCursor();
+    const bool owned = current.hasSelection() && current == ownedSelection;
+    selectionOwner = SelectionOwner::None; ownedSelection = {};
+    if (owned) { auto cursor = current; cursor.clearSelection(); locatingMatch = true; setTextCursor(cursor); locatingMatch = false; updateCursorOutline(); }
+}
 void CodeEdit::updateMatches(){
     if(!findPanel||!findPanel->isVisible())return;
     if(findRunning)return;
@@ -409,12 +419,19 @@ void CodeEdit::setAdvancedSearch(const SearchOutcome &result) {
     updateHighlights();
 }
 void CodeEdit::clearAdvancedSearch() {
-    advancedRanges.clear(); advancedCurrent = {}; advancedCurrentRow = -1; updateHighlights();
+    clearOwnedSelection(SelectionOwner::Advanced); advancedRanges.clear(); advancedCurrent = {}; advancedCurrentRow = -1; updateHighlights();
 }
 void CodeEdit::setAdvancedSearchCurrent(int row, const QTextCursor &cursor) {
     advancedCurrentRow = row; advancedCurrent = cursor;
     for (auto &range : advancedRanges) range.current = range.row == row && range.start == cursor.selectionStart() && range.end == cursor.selectionEnd();
     updateHighlights();
+}
+void CodeEdit::selectAdvancedSearchCurrent(int row, const QTextCursor &cursor) {
+    searchSelection = false;
+    setAdvancedSearchCurrent(row, cursor);
+    locatingMatch = true; setTextCursor(cursor); locatingMatch = false;
+    selectionOwner = SelectionOwner::Advanced; ownedSelection = cursor;
+    updateSearchSelectionStyle(); updateCursorOutline();
 }
 void CodeEdit::adjustAdvancedSearch(int position, int removed, int added) {
     if (advancedRanges.isEmpty() && advancedCurrent.isNull()) return;
@@ -685,7 +702,7 @@ void CodeEdit::locate(bool back) {
         if(back){currentMatch=matches.size()-1;for(int i=matches.size()-1;i>=0;--i)if(matches[i].end<=position){currentMatch=i;break;}}
         else for(int i=0;i<matches.size();++i)if(matches[i].start>=position){currentMatch=i;break;}
     }else currentMatch=(currentMatch+(back?-1:1)+matches.size())%matches.size();
-    const auto &match=matches[currentMatch];QTextCursor c(document());c.setPosition(match.start);c.setPosition(match.end,QTextCursor::KeepAnchor);locatingMatch=true;setTextCursor(c);locatingMatch=false;searchSelection=true;centerCursor();paintMatches();
+    const auto &match=matches[currentMatch];QTextCursor c(document());c.setPosition(match.start);c.setPosition(match.end,QTextCursor::KeepAnchor);locatingMatch=true;setTextCursor(c);locatingMatch=false;selectionOwner=SelectionOwner::Find;ownedSelection=c;searchSelection=true;centerCursor();paintMatches();
 }
 void CodeEdit::resizeEvent(QResizeEvent *e) {
     QPlainTextEdit::resizeEvent(e);

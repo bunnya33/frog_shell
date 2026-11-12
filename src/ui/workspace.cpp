@@ -472,6 +472,7 @@ Workspace::Workspace(Profile p, std::optional<QByteArray> secret, bool demonstra
         QTimer::singleShot(0, this, &Workspace::reconnect);
     restoreWorkspaceLayout();
     restoringWorkspaceLayout = false;
+    for (auto group : editArea->groups()) hadEditorPages |= group->count() > 0;
 }
 Workspace::~Workspace() {
     saveWorkspaceLayout();
@@ -719,6 +720,7 @@ void Workspace::buildUi() {
     connect(editArea, &EditorArea::movePageRequested, this, [this](QWidget *p) { movePage(p); });
     connect(editArea, &EditorArea::floatPageRequested, this, &Workspace::floatPage);
     connect(editArea, &EditorArea::pagePresented, this, &Workspace::pagePresented);
+    connect(editArea, &EditorArea::layoutChanged, this, &Workspace::scheduleEditorEmptyCheck);
     terminalPanel = new QWidget;
     auto tl = new QVBoxLayout(terminalPanel);
     uiMargins(tl,0,0,0,0);
@@ -2682,7 +2684,33 @@ void Workspace::pagePresented(QWidget *page) {
     if (page == processPage) activeSystemPage = "process";
     else if (page == listeningPage) activeSystemPage = "listening";
     layoutReset = false;
-    if (terminalMaximized) setTerminalMaximized(false);
+    for (auto group : editArea->groups()) {
+        if (group->count()) {
+            hadEditorPages = true;
+            if (terminalMaximized) setTerminalMaximized(false);
+            break;
+        }
+    }
+}
+void Workspace::scheduleEditorEmptyCheck() {
+    if (restoringWorkspaceLayout || shuttingDown) return;
+    for (auto group : editArea->groups()) {
+        if (group->count()) { hadEditorPages = true; return; }
+    }
+    if (!hadEditorPages || editorEmptyCheckQueued) return;
+    editorEmptyCheckQueued = true;
+    // Tab moves can briefly empty a group before inserting into its target.
+    // Check all groups after the synchronous migration completes.
+    QTimer::singleShot(0, this, [this] {
+        editorEmptyCheckQueued = false;
+        applyEditorEmptyCheck();
+    });
+}
+void Workspace::applyEditorEmptyCheck() {
+    if (restoringWorkspaceLayout || shuttingDown || !hadEditorPages) return;
+    for (auto group : editArea->groups()) if (group->count()) return;
+    hadEditorPages = false;
+    setTerminalMaximized(true);
 }
 void Workspace::restoreWorkspaceLayout() {
     if (!layoutPersistenceEnabled) return;
@@ -2711,6 +2739,7 @@ void Workspace::restoreWorkspaceLayout() {
 }
 void Workspace::saveWorkspaceLayout() {
     if (!layoutPersistenceEnabled || layoutSaved || layoutReset || profile.id.isEmpty()) return;
+    applyEditorEmptyCheck();
     layoutSaved = true;
     QStringList pages;
     for (auto group : editArea->groups()) {

@@ -20,6 +20,7 @@ class CodeEdit : public QPlainTextEdit {
     void setAdvancedSearch(const SearchOutcome &result);
     void clearAdvancedSearch();
     void setAdvancedSearchCurrent(int row, const QTextCursor &cursor);
+    void selectAdvancedSearchCurrent(int row, const QTextCursor &cursor);
   signals:
     void syntaxStatusChanged(const QString &status);
 
@@ -58,6 +59,10 @@ class CodeEdit : public QPlainTextEdit {
     int currentMatch = -1;
     bool searchSelection = false;
     bool locatingMatch = false;
+    enum class SelectionOwner { None, Find, Advanced };
+    SelectionOwner selectionOwner = SelectionOwner::None;
+    QTextCursor ownedSelection;
+    void clearOwnedSelection(SelectionOwner owner);
     bool searchSelectionStyle = false;
     QTextBlock outlinedBlock;
     quint64 highlightRebuildCount = 0;

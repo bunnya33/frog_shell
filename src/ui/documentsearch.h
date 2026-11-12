@@ -96,6 +96,7 @@ class DocumentSearchController final : public QObject {
     Workspace *sourceWorkspace(const SearchSource &source) const;
     Editor *editorFromFocus(QWidget *focus) const;
     void cancelSearch();
+    void clearHighlights();
     void attachResults(Workspace *workspace);
     void parkResults();
     void navigate(Editor *editor, int row, bool reopened);

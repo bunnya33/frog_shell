@@ -155,6 +155,7 @@ class EditorHighlightTests : public QObject {
         QTest::keyClick(query, Qt::Key_A, Qt::ControlModifier);
         QTest::keyClick(query, Qt::Key_Backspace);
         QTRY_VERIFY(edit.extraSelections().isEmpty());
+        QVERIFY(!edit.textCursor().hasSelection());
         QCOMPARE(rowBackground(edit, image(edit)), background);
         QTest::keyClicks(query, "absent");
         QTRY_COMPARE_WITH_TIMEOUT(status->text(), QString("无结果"), 5000);
@@ -175,12 +176,23 @@ class EditorHighlightTests : public QObject {
         QTest::keyClick(query, Qt::Key_Escape);
         QTRY_VERIFY(edit.hasFocus());
         QVERIFY(edit.extraSelections().isEmpty());
-        QCOMPARE(edit.textCursor().selectedText(), QString("needle"));
+        QVERIFY(!edit.textCursor().hasSelection());
         QTest::keyClick(&edit, Qt::Key_Right);
         QVERIFY(!edit.textCursor().hasSelection());
         QVERIFY(edgePixels(edit, image(edit), border) >= edit.cursorRect().height());
         QCOMPARE(edit.toPlainText(), original);
         QCOMPARE(edit.document()->isModified(), modified);
+    }
+    void closingFindPreservesManualSelectionAndRejectsStaleResults() {
+        CodeEdit edit; edit.setPlainText(QString(150000,'x')+" needle end"); edit.resize(700,300); edit.show();
+        edit.showFind(); auto query=edit.findChild<QLineEdit *>("findQuery"); auto status=edit.findChild<QLabel *>("findStatus");
+        query->setText("needle"); QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(" / 1"),5000);
+        QVERIFY(edit.textCursor().hasSelection());
+        QTextCursor manual(edit.document());manual.setPosition(0);manual.setPosition(4,QTextCursor::KeepAnchor);edit.setTextCursor(manual);
+        QTest::keyClick(query,Qt::Key_Escape); QCOMPARE(edit.textCursor(),manual);
+        edit.showFind();query->setText("x");QTest::qWait(110);query->clear();
+        QTest::qWait(350);QVERIFY(edit.extraSelections().isEmpty());QCOMPARE(edit.textCursor(),manual);
+        QVERIFY(status->text().isEmpty());
     }
     void movementScrollZoomAndFocus() {
         QWidget host;
@@ -268,6 +280,15 @@ class EditorHighlightTests : public QObject {
         QVERIFY(edit.styleSheet().isEmpty()); QCOMPARE(edit.highlightRebuildCount,rebuilds);
         QCOMPARE(edit.extraSelections().size(),10001); QCOMPARE(edit.toPlainText(),text); QVERIFY(!edit.document()->isModified());
         edit.setTextCursor(current); QVERIFY(edit.styleSheet().contains("selection-color")); QCOMPARE(edit.highlightRebuildCount,rebuilds);
+    }
+    void clearedAdvancedHitDoesNotRecolorManualSelection() {
+        CodeEdit edit;edit.setPlainText("needle and text\n");edit.show();
+        SearchOutcome result;result.lines.append({1,0,"needle and text",{{0,6}}});edit.setAdvancedSearch(result);
+        QTextCursor hit(edit.document());hit.setPosition(0);hit.setPosition(6,QTextCursor::KeepAnchor);
+        edit.setAdvancedSearchCurrent(0,hit);edit.setTextCursor(hit);QVERIFY(edit.styleSheet().contains("selection-color"));
+        edit.clearAdvancedSearch();QCOMPARE(edit.textCursor(),hit);QVERIFY(edit.styleSheet().isEmpty());
+        QTextCursor other(edit.document());other.setPosition(0);other.setPosition(7,QTextCursor::KeepAnchor);
+        for(int i=0;i<4;++i){edit.setTextCursor(other);edit.setTextCursor(hit);QCOMPARE(edit.textCursor(),hit);QVERIFY(edit.styleSheet().isEmpty());}
     }
     void plainDragRepaintsOnlyAffectedRows() {
         struct PaintObserver : QObject {

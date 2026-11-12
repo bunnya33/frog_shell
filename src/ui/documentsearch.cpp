@@ -57,7 +57,7 @@ AdvancedSearchDialog::AdvancedSearchDialog(QWidget *parent) : QDialog(parent, Qt
     buttons->addWidget(find); buttons->addWidget(close); outer->addWidget(footer);
     connect(find,&QPushButton::clicked,this,&AdvancedSearchDialog::findAllRequested);
     connect(query,&QLineEdit::returnPressed,this,&AdvancedSearchDialog::findAllRequested);
-    connect(close,&QPushButton::clicked,this,&QDialog::hide);
+    connect(close,&QPushButton::clicked,this,&QDialog::reject);
     // QLineEdit handles Return; keep the default button from executing a second search.
     find->setDefault(false); find->setAutoDefault(false);
     connect(query,&QLineEdit::textEdited,this,[this]{setFeedback({});});
@@ -166,12 +166,15 @@ DocumentSearchController::DocumentSearchController(QWidget *parent):QObject(pare
     resultWindow=new QDialog(owner,Qt::Window);resultWindow->setObjectName("documentSearchResultsWindow");resultWindow->setWindowTitle("搜索结果");resultWindow->setProperty("rabbitUi",true);resultWindow->resize(uiPx(800),uiPx(450));resultWindow->setMinimumSize(uiSize(300,220));
     auto layout=new QVBoxLayout(resultWindow);uiMargins(layout,0,0,0,0);uiSpacing(layout,0);resultWindow->installEventFilter(this);
     connect(dialog,&AdvancedSearchDialog::findAllRequested,this,&DocumentSearchController::executeSearch);
+    connect(dialog,&QDialog::rejected,this,[this]{cancelSearch();clearHighlights();});
+    connect(dialog->findChild<QLineEdit *>("advancedSearchQuery"),&QLineEdit::textChanged,this,[this](const QString &value){if(value.isEmpty()){cancelSearch();clearHighlights();}});
     connect(resultPanel,&DocumentSearchResults::detachRequested,this,[this]{setDetached(!detached);});
     connect(resultPanel,&DocumentSearchResults::activateRequested,this,&DocumentSearchController::activateResult);
     connect(qApp,&QApplication::focusChanged,this,[this](QWidget *,QWidget *focus){if(auto editor=editorFromFocus(focus))lastEditor=editor;});
     if(auto lock=AppLock::instance())connect(lock,&AppLock::lockedChanged,this,[this](bool value){if(value){cancelSearch();pendingActivation=-1;}});
 }
 DocumentSearchController::~DocumentSearchController(){cancelSearch();if(highlightedEditor)highlightedEditor->clearAdvancedSearch();}
+void DocumentSearchController::clearHighlights(){pendingActivation=-1;if(highlightedEditor)highlightedEditor->clearAdvancedSearch();highlightedEditor=nullptr;}
 void DocumentSearchController::publishHighlights(Editor *editor,const SearchOutcome &result){
     if(highlightedEditor)highlightedEditor->clearAdvancedSearch();
     highlightedEditor=editor?editor->code:nullptr;
@@ -245,6 +248,7 @@ void DocumentSearchController::executeSearch() {
     dialog->setFeedback("正在查找…");emit searchStarted();timer->start(searchDeadlineMs);worker->start();
 }
 void DocumentSearchController::parkResults(){
+    cancelSearch();clearHighlights();pendingActivation=-1;
     if(host){host->editArea->removePage(resultPanel);host=nullptr;}
     resultPanel->hide();resultPanel->setParent(owner);resultWindow->hide();detached=false;resultPanel->setDetached(false);
 }
@@ -301,7 +305,9 @@ void DocumentSearchController::navigate(Editor *editor,int row,bool reopened){
     }
     emit workspaceActivationRequested(workspace);workspace->openFile(editor->path);
     auto window=editor->window();window->show();if(window->isMinimized())window->showNormal();window->raise();window->activateWindow();
-    editor->code->setAdvancedSearchCurrent(row,cursor);editor->code->setTextCursor(cursor);editor->code->centerCursor();editor->code->setFocus();
+    if(!highlightedEditor && digest(editor->code->toPlainText())==resultDigest)publishHighlights(editor,resultPanel->outcome());
+    if(!highlightedEditor)highlightedEditor=editor->code;
+    editor->code->selectAdvancedSearchCurrent(row,cursor);editor->code->centerCursor();editor->code->setFocus();
     resultPanel->setFeedback({});emit resultActivated(editor,block.blockNumber()+1,cursor.selectionStart()-block.position()+1);
 }
 bool DocumentSearchController::eventFilter(QObject *object,QEvent *event){if(object==resultWindow&&event->type()==QEvent::Close){if(!OperationGate::locked())parkResults();static_cast<QCloseEvent *>(event)->ignore();return true;}return QObject::eventFilter(object,event);}

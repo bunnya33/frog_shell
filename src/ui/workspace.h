@@ -287,11 +287,14 @@ class Workspace : public QWidget {
     int savedTerminalHeight = 280;
     qreal savedTerminalRatio = 1.0 / 3.0;
     bool restoringWorkspaceLayout = true, layoutReset = false;
+    bool hadEditorPages = false, editorEmptyCheckQueued = false;
     bool layoutPersistenceEnabled = true, layoutSaved = false;
     QString activeSystemPage;
     void restoreWorkspaceLayout();
     void saveWorkspaceLayout();
     void pagePresented(QWidget *page);
+    void scheduleEditorEmptyCheck();
+    void applyEditorEmptyCheck();
     qreal terminalManagerBaseWidth=170;
     void sizeTerminalManager();
     QString preferredNic;

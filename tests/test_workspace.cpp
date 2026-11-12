@@ -144,6 +144,77 @@ class WorkspaceTests : public QObject {
             QVERIFY(w.terminalMaximized); QVERIFY(w.editors.isEmpty());
         }
     }
+    void emptyEditorAreaMaximizesExistingBottomPanel() {
+        const auto p = profile("layout-empty-editor");
+        Workspace w(p, {}, false); w.demo = true; w.resize(1100,720); w.show(); settle();
+        QVERIFY(w.terminals.isEmpty());
+        auto first = new Editor(p.id,"/first.txt",QByteArray("one"),QByteArray());
+        auto second = new Editor(p.id,"/second.txt",QByteArray("two"),QByteArray());
+        w.editors[first->path] = first; w.editArea->addPage(first,"first.txt");
+        w.editors[second->path] = second; w.editArea->addPage(second,"second.txt");
+        w.editArea->splitActive(Qt::Horizontal); settle();
+        QCOMPARE(w.editArea->groups().size(), 2); QVERIFY(!w.terminalMaximized);
+        WorkspacePopupEvents visibility; w.editorPanel->installEventFilter(&visibility);
+        w.editArea->mergeAll(); settle();
+        QVERIFY(!w.terminalMaximized); QCOMPARE(visibility.hides, 0);
+        w.editArea->splitActive(Qt::Horizontal); settle();
+        w.closePage(first); settle();
+        QVERIFY(w.groupFor(second)); QVERIFY(!w.terminalMaximized); QCOMPARE(visibility.hides, 0);
+        w.verticalSplit->setSizes({600, 300}); settle();
+        const auto before = w.verticalSplit->sizes();
+        w.bottomTabs->setCurrentIndex(2);
+        w.closePage(second); settle();
+        QVERIFY(w.terminalMaximized); QCOMPARE(w.bottomTabs->currentIndex(), 2);
+        QVERIFY(w.terminals.isEmpty());
+        auto reopened = new Editor(p.id,"/reopened.txt",QByteArray("again"),QByteArray());
+        w.editors[reopened->path] = reopened; w.editArea->addPage(reopened,"reopened.txt"); settle();
+        QVERIFY(!w.terminalMaximized); QCOMPARE(w.verticalSplit->sizes(), before);
+        QCOMPARE(w.bottomTabs->currentIndex(), 2);
+        w.bottomTabs->setCurrentIndex(1);
+        w.floatPage(reopened); settle(); QVERIFY(w.terminalMaximized); QCOMPARE(w.bottomTabs->currentIndex(), 1);
+        w.openFile(reopened->path); settle(); QVERIFY(w.terminalMaximized);
+        w.movePage(reopened); settle(); QVERIFY(!w.terminalMaximized); QVERIFY(w.groupFor(reopened));
+        w.closePage(reopened); settle();
+        QVERIFY(w.terminalMaximized);
+        w.demo = false; w.showProcessPage();
+        QVERIFY(!w.terminalMaximized); w.closePage(w.processPage); settle();
+        QVERIFY(w.terminalMaximized); QVERIFY(w.terminals.isEmpty());
+        w.showListeningPage(); QVERIFY(!w.terminalMaximized);
+        w.floatPage(w.listeningPage); settle(); QVERIFY(w.terminalMaximized);
+        w.showListeningPage(); QVERIFY(w.terminalMaximized);
+        settle(); QVERIFY(w.terminalMaximized);
+        w.movePage(w.listeningPage); QVERIFY(!w.terminalMaximized);
+        w.floatPage(w.listeningPage); w.showListeningPage(); settle();
+        QVERIFY(w.terminalMaximized);
+        w.movePage(w.listeningPage);
+        const int hidesBeforeReturn = visibility.hides;
+        w.floatPage(w.listeningPage); w.movePage(w.listeningPage);
+        settle(); QVERIFY(!w.terminalMaximized); QCOMPARE(visibility.hides, hidesBeforeReturn);
+        w.demo = true;
+    }
+    void emptyEditorTransitionIsIsolatedAcrossWorkspaces() {
+        const auto a = profile("layout-switch-a"), b = profile("layout-switch-b");
+        {
+            Workspace first(a, {}, false); first.demo = true;
+            Workspace second(b, {}, false); second.demo = true;
+            first.resize(1100,720); second.resize(1100,720); first.show(); settle();
+            first.demo = false; first.showProcessPage(); first.demo = true;
+            first.setActive(false); first.hide(); second.setActive(true); second.show(); settle();
+            QVERIFY(!first.terminalMaximized); QVERIFY(second.terminalMaximized);
+            second.demo = false; second.showListeningPage(); second.demo = true;
+            second.setActive(false); second.hide(); first.setActive(true); first.show(); settle();
+            QVERIFY(!first.terminalMaximized); QVERIFY(!second.terminalMaximized);
+            first.closePage(first.processPage); // save before the queued check runs
+            first.saveWorkspaceLayout(); QVERIFY(first.terminalMaximized);
+            QVERIFY(!second.terminalMaximized);
+        }
+        {
+            Workspace first(a, {}, false); first.demo = true;
+            Workspace second(b, {}, false); second.demo = true;
+            settle(); QVERIFY(first.terminalMaximized); QVERIFY(!first.processPage);
+            QVERIFY(!second.terminalMaximized); QVERIFY(second.groupFor(second.listeningPage));
+        }
+    }
     void workspaceLayoutResetAndFloatingPage() {
         const auto p = profile("layout-reset");
         {
@@ -205,20 +276,22 @@ class WorkspaceTests : public QObject {
         }
         applyTheme(false);
     }
-    void reopeningFloatingPagesRestoresTerminalPanel() {
+    void reopeningFloatingPagesRespectsDockedPages() {
         const auto p=profile("layout-floating-reopen");
         {
             Workspace w(p,{},false); w.demo=true; w.resize(1100,720); w.show(); settle();
             auto file=new Editor(p.id,"/floating.txt",QByteArray("fixture"),QByteArray());
             w.editors[file->path]=file; w.editArea->addPage(file,"floating.txt"); w.floatPage(file);
             w.setTerminalMaximized(true); w.openFile(file->path);
-            QVERIFY(!w.terminalMaximized); QVERIFY(w.floating.contains(file));
-            w.demo=false; w.showProcessPage(); w.showListeningPage();
+            QVERIFY(w.terminalMaximized); QVERIFY(w.floating.contains(file));
+            w.demo=false; w.showProcessPage();
+            w.setTerminalMaximized(true); w.openFile(file->path); QVERIFY(!w.terminalMaximized);
+            w.showListeningPage();
             w.floatPage(w.processPage); w.floatPage(w.listeningPage);
             w.setTerminalMaximized(true); w.showProcessPage();
-            QVERIFY(!w.terminalMaximized); QCOMPARE(w.activeSystemPage,QString("process"));
+            QVERIFY(w.terminalMaximized); QCOMPARE(w.activeSystemPage,QString("process"));
             w.setTerminalMaximized(true); w.showListeningPage();
-            QVERIFY(!w.terminalMaximized); QCOMPARE(w.activeSystemPage,QString("listening"));
+            QVERIFY(w.terminalMaximized); QCOMPARE(w.activeSystemPage,QString("listening"));
             w.demo=true;
         }
         {
