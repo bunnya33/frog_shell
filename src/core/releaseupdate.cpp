@@ -1,0 +1,460 @@
+#include "releaseupdate.h"
+#include <QCryptographicHash>
+#include <QDir>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QPointer>
+#include <QRegularExpression>
+#include <QSaveFile>
+#include <QStringDecoder>
+#include <QTemporaryDir>
+#include <QThread>
+#include <QTimer>
+#include <QTimeZone>
+#include <cmath>
+
+namespace rs::releaseupdate {
+namespace {
+struct Version { QStringList number, pre; };
+bool numeric(const QString &s) {
+    if (s.isEmpty()) return false;
+    for (auto c : s) if (c < u'0' || c > u'9') return false;
+    return true;
+}
+bool parseVersion(const QString &s, Version *out = nullptr) {
+    if (s.size() > 256) return false;
+    static const QRegularExpression re(QStringLiteral(
+        "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)"
+        "(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?"
+        "(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$"));
+    const auto match = re.match(s);
+    if (!match.hasMatch() || match.capturedLength() != s.size()) return false;
+    Version v{{match.captured(1), match.captured(2), match.captured(3)}, {}};
+    if (!match.captured(4).isEmpty()) {
+        v.pre = match.captured(4).split(u'.');
+        for (const auto &part : v.pre) if (numeric(part) && part.size() > 1 && part[0] == u'0') return false;
+    }
+    if (out) *out = v;
+    return true;
+}
+int compareNumber(const QString &a, const QString &b) {
+    if (a.size() != b.size()) return a.size() < b.size() ? -1 : 1;
+    return QString::compare(a, b, Qt::CaseSensitive);
+}
+bool secure(const QUrl &url) {
+    return url.isValid() && !url.isRelative() && url.scheme() == "https" &&
+           !url.host().isEmpty() && url.userInfo().isEmpty() && !url.authority().contains(u'@') && !url.hasFragment() &&
+           (url.port(-1) == -1 || url.port() == 443) &&
+           !url.path().contains(QChar(0)) && !url.path().contains(u'\\');
+}
+bool ownedPath(const QUrl &url, const Config &c, const QString &kind) {
+    if (!secure(url) || url.host() != "github.com") return false;
+    const auto parts = url.path(QUrl::FullyDecoded).split(u'/', Qt::KeepEmptyParts);
+    if (parts.size() < 6 || parts[0] != "" ||
+        parts[1].compare(c.owner, Qt::CaseInsensitive) != 0 ||
+        parts[2].compare(c.repository, Qt::CaseInsensitive) != 0 ||
+        parts[3] != "releases" || parts[4] != kind) return false;
+    for (int i = 5; i < parts.size(); ++i)
+        if (parts[i].isEmpty() || parts[i] == "." || parts[i] == "..") return false;
+    return true;
+}
+bool exactTail(const QUrl &url, const QStringList &tail) {
+    return url.path(QUrl::FullyDecoded).split(u'/',Qt::KeepEmptyParts).mid(5)==tail;
+}
+QString boundedNotes(const QString &text) {
+    const auto bytes=text.toUtf8();
+    if(bytes.size()<=65536)return text;
+    int end=65536;
+    while(end>0&&(static_cast<unsigned char>(bytes[end])&0xc0)==0x80)--end;
+    return QString::fromUtf8(bytes.constData(),end);
+}
+Error error(ErrorCode code, const QString &message, int status = 0) { return {code, message, status, {}}; }
+bool integerSize(const QJsonValue &v, qint64 maximum, qint64 *value) {
+    if (!v.isDouble()) return false;
+    const double d = v.toDouble();
+    if (!std::isfinite(d) || d <= 0 || d > double(maximum) || std::floor(d) != d) return false;
+    *value = qint64(d); return true;
+}
+QUrl strictUrl(const QJsonValue &value) {
+    return value.isString() ? QUrl(value.toString(), QUrl::StrictMode) : QUrl();
+}
+QDateTime nowFor(const Schedule &s) { return s.nowUtc.isValid() ? s.nowUtc.toUTC() : QDateTime::currentDateTimeUtc(); }
+}
+bool isStrictSemVer(const QString &version) { return parseVersion(version); }
+int compareVersions(const QString &a, const QString &b, bool *ok) {
+    Version av, bv;
+    const bool valid = parseVersion(a, &av) && parseVersion(b, &bv);
+    if (ok) *ok = valid;
+    if (!valid) return 0;
+    for (int i = 0; i < 3; ++i) { const int c = compareNumber(av.number[i], bv.number[i]); if (c) return c < 0 ? -1 : 1; }
+    if (av.pre.isEmpty() != bv.pre.isEmpty()) return av.pre.isEmpty() ? 1 : -1;
+    for (int i = 0; i < qMin(av.pre.size(), bv.pre.size()); ++i) {
+        const auto &x = av.pre[i]; const auto &y = bv.pre[i];
+        const bool xn = numeric(x), yn = numeric(y);
+        const int c = xn && yn ? compareNumber(x,y) : xn != yn ? (xn ? -1 : 1) : QString::compare(x,y,Qt::CaseSensitive);
+        if (c) return c < 0 ? -1 : 1;
+    }
+    return av.pre.size() == bv.pre.size() ? 0 : av.pre.size() < bv.pre.size() ? -1 : 1;
+}
+QString portableAssetName(const QString &version, const QString &platform, const QString &architecture) {
+    Version v;
+    if (!parseVersion(version, &v) || !v.pre.isEmpty() || platform != "windows") return {};
+    if (architecture == "x86_64") return "FrogShell-" + version + "-portable.exe";
+    if (architecture == "arm64") return "FrogShell-" + version + "-windows-arm64-portable.exe";
+    return {};
+}
+bool validConfig(const Config &c, QString *reason) {
+    static const QRegularExpression owner("^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$");
+    static const QRegularExpression repo("^[A-Za-z0-9_.-]{1,100}$");
+    QString why;
+    if (!owner.match(c.owner).hasMatch() || owner.match(c.owner).capturedLength()!=c.owner.size() || c.owner.contains("--") ||
+        !repo.match(c.repository).hasMatch() || repo.match(c.repository).capturedLength()!=c.repository.size() || c.repository == "." || c.repository == "..") why = "Invalid public GitHub owner/repository";
+    else if (!isStrictSemVer(c.currentVersion)) why = "Current version must be strict SemVer";
+    else if (c.platform.isEmpty() || c.architecture.isEmpty()) why = "Platform and architecture are required";
+    if (reason) *reason = why;
+    return why.isEmpty();
+}
+bool allowedReleaseDownloadUrl(const QUrl &url, const Config &c) {
+    return ownedPath(url,c,"download") && url.path(QUrl::FullyDecoded).split(u'/').size() == 7 && !url.hasQuery();
+}
+bool allowedRedirectUrl(const QUrl &url, const Config &c) {
+    if (!secure(url)) return false;
+    return allowedReleaseDownloadUrl(url,c) || url.host() == "release-assets.githubusercontent.com" ||
+           url.host() == "objects.githubusercontent.com";
+}
+
+struct Client::Impl {
+    enum class Phase { None, Metadata, Checksum, Payload };
+    Client *q;
+    Config config;
+    Limits limits;
+    QPointer<QNetworkAccessManager> manager;
+    QPointer<QNetworkReply> reply;
+    QTimer idle, deadline;
+    State state = State::Idle;
+    Error lastError;
+    Release release;
+    Phase phase = Phase::None;
+    Schedule schedule;
+    CheckMode mode = CheckMode::Manual;
+    QDateTime clock, rateUntil, automaticAttempt;
+    QUrl logicalUrl, metadataUrl, checksumUrl;
+    qint64 checksumSize = 0, written = 0;
+    int redirectCount = 0;
+    quint64 operation = 0, request = 0;
+    QByteArray buffer;
+    std::unique_ptr<QTemporaryDir> temporary;
+    std::unique_ptr<QSaveFile> output;
+    std::unique_ptr<QCryptographicHash> hash;
+
+    Impl(Client *owner, const Config &c, QNetworkAccessManager *transport, const Limits &l)
+        : q(owner), config(c), limits(l), manager(transport ? transport : new QNetworkAccessManager(owner)) {
+        idle.setSingleShot(true); deadline.setSingleShot(true);
+        QObject::connect(&idle,&QTimer::timeout,q,[this]{if (busy()) fail(error(ErrorCode::Timeout,"Network inactivity timeout"));});
+        QObject::connect(&deadline,&QTimer::timeout,q,[this]{if (busy()) fail(error(ErrorCode::Timeout,"Update request deadline exceeded"));});
+    }
+    bool busy() const { return phase != Phase::None; }
+    bool transition(State next, const QString &message) {
+        state = next; QPointer<Client> guard(q); emit q->stateChanged(next,message); return !guard.isNull();
+    }
+    bool limitsValid() const {
+        return limits.metadataBytes > 0 && limits.metadataBytes <= 8LL*1024*1024 &&
+               limits.checksumBytes > 0 && limits.checksumBytes <= 1024*1024 &&
+               limits.downloadBytes > 0 && limits.downloadBytes <= 2LL*1024*1024*1024 &&
+               limits.inactivityTimeoutMs > 0 && limits.inactivityTimeoutMs <= 120000 &&
+               limits.requestTimeoutMs > 0 && limits.requestTimeoutMs <= 300000 &&
+               limits.downloadTimeoutMs > 0 && limits.downloadTimeoutMs <= 2*60*60*1000 &&
+               limits.redirects >= 0 && limits.redirects <= 10;
+    }
+    void stopReply() {
+        ++request;
+        if (reply) { auto r = reply.data(); reply = nullptr; QObject::disconnect(r,nullptr,q,nullptr); r->abort(); r->deleteLater(); }
+        idle.stop();
+    }
+    void cleanOutput() {
+        if (output) output->cancelWriting();
+        output.reset(); hash.reset(); temporary.reset(); written = 0;
+    }
+    void resetNetwork() { stopReply(); deadline.stop(); buffer.clear(); }
+    void fail(const Error &e) {
+        const bool wasCheck = phase == Phase::Metadata || phase == Phase::Checksum;
+        ++operation; resetNetwork(); cleanOutput(); phase = Phase::None; lastError = e;
+        const auto op=operation;
+        const auto result = CheckResult{State::Failed,release,e,false};
+        QPointer<Client> guard(q);
+        if (!transition(State::Failed,e.message)) return;
+        if(operation!=op)return;
+        emit q->errorOccurred(e); if (!guard || operation!=op) return;
+        if (wasCheck) emit q->checkFinished(result);
+    }
+    void finishCheck(State next, const Error &e = {}) {
+        resetNetwork(); phase = Phase::None; lastError = e;
+        const bool notify = next == State::Available && (mode == CheckMode::Manual || schedule.lastNotifiedVersion != release.version);
+        const CheckResult result{next,release,e,notify};
+        const auto op=operation;
+        if (!transition(next,e.message)) return;
+        if(operation!=op)return;
+        emit q->checkFinished(result);
+    }
+    bool metadataAllowed(const QUrl &url) const { return secure(url) && url == metadataUrl; }
+    void startRequest(const QUrl &url) {
+        if (!manager || manager->thread() != q->thread()) { fail(error(ErrorCode::InvalidConfiguration,"Transport must outlive Client and share its thread")); return; }
+        stopReply(); logicalUrl = url; buffer.clear();
+        QNetworkRequest req(url);
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,QNetworkRequest::ManualRedirectPolicy);
+        req.setAttribute(QNetworkRequest::AuthenticationReuseAttribute,QNetworkRequest::Manual);
+        req.setAttribute(QNetworkRequest::CookieLoadControlAttribute,QNetworkRequest::Manual);
+        req.setAttribute(QNetworkRequest::CookieSaveControlAttribute,QNetworkRequest::Manual);
+        req.setRawHeader("User-Agent","FrogShell-ReleaseUpdate/1");
+        req.setRawHeader("Accept",phase == Phase::Metadata ? "application/vnd.github+json" : "application/octet-stream");
+        req.setRawHeader("Accept-Encoding","identity");
+        if (phase == Phase::Metadata) req.setRawHeader("X-GitHub-Api-Version","2022-11-28");
+        auto r = manager->get(req); reply = r; r->setReadBufferSize(128*1024);
+        const quint64 id = request, op = operation;
+        auto active = [this,r,id,op]{return reply == r && request == id && operation == op;};
+        QObject::connect(r,&QNetworkReply::metaDataChanged,q,[this,active]{if(active()) headers();});
+        QObject::connect(r,&QIODevice::readyRead,q,[this,active]{if(active()){idle.start(limits.inactivityTimeoutMs); drain();}});
+        QObject::connect(r,&QNetworkReply::sslErrors,q,[this,active](const QList<QSslError>&){if(active())fail(error(ErrorCode::Tls,"TLS certificate verification failed"));});
+        QObject::connect(r,&QNetworkReply::finished,q,[this,active]{if(active()) finished();});
+        idle.start(limits.inactivityTimeoutMs);
+    }
+    Error httpError(int status) {
+        Error e = error(ErrorCode::Http,QString("GitHub HTTP %1").arg(status),status);
+        if (status == 429 || (status == 403 && reply && reply->rawHeader("X-RateLimit-Remaining") == "0") ||
+            (status == 403 && reply && !reply->rawHeader("Retry-After").isEmpty())) {
+            e.code = ErrorCode::RateLimited; e.message = "GitHub rate limit reached";
+            const auto now = nowFor(schedule);
+            QDateTime retry;
+            const auto after = reply->rawHeader("Retry-After"); bool ok = false;
+            const auto seconds = after.toLongLong(&ok);
+            if (ok && seconds >= 0) retry = now.addSecs(qMin<qint64>(seconds,86400));
+            else if (!after.isEmpty()) retry = QDateTime::fromString(QString::fromLatin1(after),Qt::RFC2822Date).toUTC();
+            const auto reset = reply->rawHeader("X-RateLimit-Reset").toLongLong(&ok);
+            if (!retry.isValid() && ok && reset > 0) retry = QDateTime::fromSecsSinceEpoch(reset,QTimeZone::UTC);
+            if (!retry.isValid() || retry <= now) retry = now.addSecs(60);
+            if (retry > now.addDays(1)) retry = now.addDays(1);
+            rateUntil = retry; e.retryAfterUtc = retry;
+        }
+        return e;
+    }
+    bool headers() {
+        if (!reply) return false;
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (!status) return true;
+        if (status >= 300 && status <= 399) return true;
+        if (status != 200) { fail(httpError(status)); return false; }
+        const qint64 maximum = phase == Phase::Payload ? qMin(limits.downloadBytes,release.size) :
+                               phase == Phase::Metadata ? limits.metadataBytes : limits.checksumBytes;
+        const auto rawLength = reply->rawHeader("Content-Length");
+        if (!rawLength.isEmpty()) {
+            bool ok = false; const qint64 size = rawLength.toLongLong(&ok);
+            if (!ok || size < 0) {fail(error(ErrorCode::InvalidMetadata,"Invalid Content-Length")); return false;}
+            if (size > maximum) {fail(error(ErrorCode::SizeLimit,"Response exceeds update size limit")); return false;}
+            if (phase == Phase::Payload && size != release.size) {fail(error(ErrorCode::InvalidMetadata,"Download length differs from Release asset size")); return false;}
+        }
+        const auto encoding = reply->rawHeader("Content-Encoding").trimmed().toLower();
+        if (!encoding.isEmpty() && encoding != "identity") {fail(error(ErrorCode::InvalidMetadata,"Encoded update responses are not accepted"));return false;}
+        return true;
+    }
+    void drain() {
+        if (!headers() || !reply) return;
+        if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200) return;
+        const quint64 op = operation, id = request;
+        int budget = 256*1024;
+        while (reply && reply->bytesAvailable() && budget > 0) {
+            const QByteArray chunk = reply->read(qMin<qint64>(64*1024,budget));
+            if (chunk.isEmpty()) break;
+            budget -= int(chunk.size());
+            if (phase == Phase::Payload) {
+                if (written + chunk.size() > release.size || written + chunk.size() > limits.downloadBytes) {fail(error(ErrorCode::SizeLimit,"Download exceeds expected size"));return;}
+                if (!output || output->write(chunk) != chunk.size()) {fail(error(ErrorCode::Io,"Unable to write update staging file"));return;}
+                hash->addData(chunk); written += chunk.size();
+                QPointer<Client> guard(q); emit q->downloadProgress(written,release.size);
+                if (!guard || operation != op || request != id) return;
+            } else {
+                const auto maximum = phase == Phase::Metadata ? limits.metadataBytes : limits.checksumBytes;
+                if (buffer.size() + chunk.size() > maximum) {fail(error(ErrorCode::SizeLimit,"Response exceeds update size limit"));return;}
+                buffer += chunk;
+            }
+        }
+        if (reply && reply->bytesAvailable()) QTimer::singleShot(0,q,[this,op,id]{if(operation==op && request==id) drain();});
+    }
+    void finished() {
+        if (!reply) return;
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+            const auto target = reply->attribute(QNetworkRequest::RedirectionTargetAttribute).toUrl();
+            const auto next = logicalUrl.resolved(target);
+            if (target.isEmpty() || ++redirectCount > limits.redirects ||
+                (phase == Phase::Metadata ? !metadataAllowed(next) : !allowedRedirectUrl(next,config))) {
+                fail(error(ErrorCode::UnsafeUrl,"Rejected update redirect")); return;
+            }
+            startRequest(next); return;
+        }
+        if (!headers() || !reply) return;
+        if (reply->error() != QNetworkReply::NoError) {fail(error(ErrorCode::Network,"Update network transfer failed",status));return;}
+        if (status != 200) {fail(httpError(status));return;}
+        const auto savedOperation=operation,savedRequest=request;
+        QPointer<Client> guard(q);drain();
+        if (!guard || operation!=savedOperation || request!=savedRequest || !reply) return;
+        // readBufferSize bounds the final available data; continue asynchronously
+        // if an injected transport exposes more than the per-event budget.
+        if (reply->bytesAvailable()) {const auto op=operation,id=request;QTimer::singleShot(0,q,[this,op,id]{if(operation==op&&request==id)finished();});return;}
+        stopReply();
+        if (phase == Phase::Metadata) parseMetadata();
+        else if (phase == Phase::Checksum) parseChecksum();
+        else if (phase == Phase::Payload) completeDownload();
+    }
+    void parseMetadata() {
+        QJsonParseError pe;
+        const auto doc = QJsonDocument::fromJson(buffer,&pe); buffer.clear();
+        if (pe.error != QJsonParseError::NoError || !doc.isObject()) {fail(error(ErrorCode::InvalidMetadata,"Invalid GitHub Release JSON"));return;}
+        const auto object = doc.object();
+        if (!object["draft"].isBool() || !object["prerelease"].isBool() || !object["tag_name"].isString() || !object["assets"].isArray()) {fail(error(ErrorCode::InvalidMetadata,"Incomplete GitHub Release metadata"));return;}
+        if (object["draft"].toBool() || object["prerelease"].toBool()) {finishCheck(State::UpToDate);return;}
+        const auto tag = object["tag_name"].toString();
+        const auto version = tag.startsWith(u'v') ? tag.mid(1) : tag;
+        Version parsed;
+        if (!parseVersion(version,&parsed)) {fail(error(ErrorCode::InvalidVersion,"Release tag must contain strict SemVer"));return;}
+        if (!parsed.pre.isEmpty()) {finishCheck(State::UpToDate);return;}
+        if (compareVersions(version,config.currentVersion) <= 0) {finishCheck(State::UpToDate);return;}
+        const auto page = strictUrl(object["html_url"]);
+        if (!ownedPath(page,config,"tag") || page.hasQuery() || !exactTail(page,{tag})) {fail(error(ErrorCode::UnsafeUrl,"Release page does not belong to configured repository/tag"));return;}
+        release = {version,tag,{},page,{},0,{}};
+        if(!object["body"].isUndefined()&&!object["body"].isNull()&&!object["body"].isString()){fail(error(ErrorCode::InvalidMetadata,"Invalid Release notes type"));return;}
+        release.notes=boundedNotes(object["body"].toString());
+        const auto expected = portableAssetName(version,config.platform,config.architecture);
+        if (expected.isEmpty()) {finishCheck(State::ManualDownload,error(ErrorCode::MissingDigest,"No portable asset convention for this platform/architecture"));return;}
+        QJsonObject chosen; int matches = 0;
+        const auto assets = object["assets"].toArray();
+        for (const auto &value : assets) {
+            if (!value.isObject()) {fail(error(ErrorCode::InvalidMetadata,"Invalid Release asset entry"));return;}
+            const auto a = value.toObject();
+            if (a["name"].toString() == expected) {chosen=a;++matches;}
+        }
+        if (matches > 1) {fail(error(ErrorCode::InvalidMetadata,"Ambiguous duplicate portable assets"));return;}
+        if (!matches) {finishCheck(State::ManualDownload,error(ErrorCode::MissingDigest,"No exact portable asset for this architecture"));return;}
+        qint64 size = 0; const auto url = strictUrl(chosen["browser_download_url"]);
+        if (!integerSize(chosen["size"],limits.downloadBytes,&size)) {fail(error(ErrorCode::SizeLimit,"Invalid or oversized portable asset"));return;}
+        if (!allowedReleaseDownloadUrl(url,config) || !exactTail(url,{tag,expected})) {fail(error(ErrorCode::UnsafeUrl,"Portable asset URL does not match repository/tag/name"));return;}
+        if (chosen.contains("state") && chosen["state"].toString() != "uploaded") {fail(error(ErrorCode::InvalidMetadata,"Portable asset is not uploaded"));return;}
+        release.assetName=expected;release.downloadUrl=url;release.size=size;
+        const auto digest = chosen["digest"];
+        if (!digest.isUndefined() && !digest.isNull() && (!digest.isString() || !digest.toString().isEmpty())) {
+            static const QRegularExpression sha("^sha256:([0-9A-Fa-f]{64})$");
+            const auto m = sha.match(digest.toString());
+            if (!digest.isString() || !m.hasMatch() || m.capturedLength() != digest.toString().size()) {fail(error(ErrorCode::InvalidMetadata,"Invalid GitHub SHA256 digest"));return;}
+            release.sha256=QByteArray::fromHex(m.captured(1).toLatin1());finishCheck(State::Available);return;
+        }
+        QJsonObject checksum; int count = 0;
+        // Prefer the asset-specific checksum; then the exact shared list name.
+        for (const auto &name : QStringList{expected+".sha256",QStringLiteral("SHA256SUMS")}) {
+            count=0;
+            for (const auto &value : assets) if(value.toObject()["name"].toString()==name){checksum=value.toObject();++count;}
+            if(count) break;
+        }
+        if (count > 1) {fail(error(ErrorCode::InvalidMetadata,"Ambiguous checksum assets"));return;}
+        if (!count) {finishCheck(State::ManualDownload,error(ErrorCode::MissingDigest,"No verifiable SHA256 digest; use the Release page"));return;}
+        checksumUrl = strictUrl(checksum["browser_download_url"]);
+        const auto checksumName=checksum["name"].toString();
+        if (!allowedReleaseDownloadUrl(checksumUrl,config) || !exactTail(checksumUrl,{tag,checksumName})) {fail(error(ErrorCode::UnsafeUrl,"Checksum URL does not match repository/tag/name"));return;}
+        if (!integerSize(checksum["size"],limits.checksumBytes,&checksumSize)) {fail(error(ErrorCode::SizeLimit,"Invalid or oversized checksum list"));return;}
+        phase=Phase::Checksum;startRequest(checksumUrl);
+    }
+    void parseChecksum() {
+        if (buffer.size() != checksumSize) {fail(error(ErrorCode::InvalidMetadata,"Checksum list length mismatch"));return;}
+        QStringDecoder decode(QStringDecoder::Utf8); const QString text=decode(buffer);buffer.clear();
+        if (decode.hasError() || text.contains(QChar(0))) {fail(error(ErrorCode::InvalidMetadata,"Invalid checksum list encoding"));return;}
+        static const QRegularExpression line("^([A-Fa-f0-9]{64})[ \\t]+\\*?(.+)$");
+        int count=0; QByteArray found;
+        for (auto row : text.split(u'\n')) {
+            if (row.endsWith(u'\r')) row.chop(1);
+            if (row.isEmpty() || row.startsWith(u'#')) continue;
+            const auto match=line.match(row);
+            if (match.hasMatch() && match.captured(2)==release.assetName) {found=QByteArray::fromHex(match.captured(1).toLatin1());++count;}
+        }
+        if (count != 1 || found.size()!=32) {finishCheck(State::ManualDownload,error(ErrorCode::MissingDigest,"Checksum list has no unique exact asset entry"));return;}
+        release.sha256=found;finishCheck(State::Available);
+    }
+    void completeDownload() {
+        if (written != release.size || !hash || hash->result()!=release.sha256) {fail(error(ErrorCode::DigestMismatch,"Update SHA256/size verification failed"));return;}
+        if (!output->commit()) {fail(error(ErrorCode::Io,"Unable to commit verified staging file"));return;}
+        const VerifiedDownload result{output->fileName(),release.sha256,written,release};
+        output.reset();hash.reset();
+        deadline.stop();phase=Phase::None;lastError={};
+        const auto op=operation;
+        if(!transition(State::Ready,"Update download verified"))return;
+        if(operation!=op){temporary.reset();return;}
+        temporary->setAutoRemove(false);temporary.reset();
+        emit q->downloadVerified(result);
+    }
+};
+
+Client::Client(const Config &c,QObject *parent,QNetworkAccessManager *transport,const Limits &limits)
+    : QObject(parent),d(std::make_unique<Impl>(this,c,transport,limits)) {
+    qRegisterMetaType<State>();qRegisterMetaType<Error>();qRegisterMetaType<CheckResult>();qRegisterMetaType<VerifiedDownload>();
+}
+Client::~Client() { d->resetNetwork();d->cleanOutput(); }
+Config Client::config() const {return d->config;}
+State Client::state() const {return d->state;}
+Release Client::release() const {return d->release;}
+Error Client::lastError() const {return d->lastError;}
+bool Client::busy() const {return d->busy();}
+void Client::setConfig(const Config &c) {
+    QPointer<Client> guard(this);cancel();if(!guard)return;
+    const bool changed=d->config.owner.compare(c.owner,Qt::CaseInsensitive)!=0||d->config.repository.compare(c.repository,Qt::CaseInsensitive)!=0;
+    ++d->operation;d->release={};d->lastError={};if(changed){d->rateUntil={};d->automaticAttempt={};}d->config=c;d->transition(State::Idle,{});
+}
+void Client::check(CheckMode mode,const Schedule &schedule) {
+    if(d->busy()){emit errorOccurred(error(ErrorCode::Busy,"An update operation is already running"));return;}
+    ++d->operation;d->release={};d->lastError={};d->mode=mode;d->schedule=schedule;d->clock=nowFor(schedule);d->phase=Impl::Phase::Metadata;
+    if(d->config.owner.isEmpty()||d->config.repository.isEmpty()){d->finishCheck(State::Unconfigured);return;}
+    QString reason;
+    if(!validConfig(d->config,&reason)||!d->limitsValid()){d->fail(error(ErrorCode::InvalidConfiguration,reason.isEmpty()?"Invalid update resource limits":reason));return;}
+    if(mode==CheckMode::Automatic&&!schedule.automaticEnabled){d->finishCheck(State::Disabled);return;}
+    auto previous=schedule.lastAutomaticAttemptUtc.toUTC();
+    if(d->automaticAttempt.isValid()&&(!previous.isValid()||previous<d->automaticAttempt))previous=d->automaticAttempt;
+    if(mode==CheckMode::Automatic&&previous.isValid()&&previous.secsTo(d->clock)<86400){d->finishCheck(State::Throttled);return;}
+    if(d->rateUntil.isValid()&&d->clock<d->rateUntil){auto e=error(ErrorCode::RateLimited,"GitHub rate limit cooldown active");e.retryAfterUtc=d->rateUntil;d->finishCheck(State::Throttled,e);return;}
+    d->phase=Impl::Phase::Metadata;d->redirectCount=0;
+    d->metadataUrl=QUrl("https://api.github.com/repos/"+d->config.owner+"/"+d->config.repository+"/releases/latest");
+    const auto op=d->operation;
+    if(!d->transition(State::Checking,"Checking GitHub Release"))return;
+    if(d->operation!=op)return;
+    if(mode==CheckMode::Automatic){d->automaticAttempt=d->clock;QPointer<Client> guard(this);emit automaticAttemptStarted(d->clock);if(!guard||d->operation!=op)return;}
+    d->deadline.start(d->limits.requestTimeoutMs);d->startRequest(d->metadataUrl);
+}
+void Client::download(const QString &directory) {
+    if(d->busy()){emit errorOccurred(error(ErrorCode::Busy,"An update operation is already running"));return;}
+    if(d->state!=State::Available||d->release.sha256.size()!=32||!allowedReleaseDownloadUrl(d->release.downloadUrl,d->config)) {d->fail(error(ErrorCode::MissingDigest,"Check a verifiable update before downloading"));return;}
+    const QFileInfo parent(directory);
+    if(!parent.isDir()||parent.isSymLink()){d->fail(error(ErrorCode::Io,"Staging directory must be an existing local directory"));return;}
+    d->temporary=std::make_unique<QTemporaryDir>(QDir(directory).filePath("frogshell-update-XXXXXX"));
+    if(!d->temporary->isValid()){d->fail(error(ErrorCode::Io,"Unable to create private update staging directory"));return;}
+    QFile::setPermissions(d->temporary->path(),QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
+    d->output=std::make_unique<QSaveFile>(QDir(d->temporary->path()).filePath(d->release.assetName));
+    d->output->setDirectWriteFallback(false);
+    if(!d->output->open(QIODevice::WriteOnly)){d->fail(error(ErrorCode::Io,"Unable to open update staging file"));return;}
+    d->hash=std::make_unique<QCryptographicHash>(QCryptographicHash::Sha256);d->written=0;d->phase=Impl::Phase::Payload;
+    ++d->operation;const auto op=d->operation;d->redirectCount=0;d->lastError={};
+    if(!d->transition(State::Downloading,"Downloading update"))return;
+    if(d->operation!=op)return;
+    QPointer<Client> guard(this);emit downloadProgress(0,d->release.size);if(!guard||d->operation!=op)return;
+    d->deadline.start(d->limits.downloadTimeoutMs);d->startRequest(d->release.downloadUrl);
+}
+void Client::cancel() {
+    if(!d->busy())return;
+    const bool check=d->phase==Impl::Phase::Metadata||d->phase==Impl::Phase::Checksum;
+    ++d->operation;d->resetNetwork();d->cleanOutput();d->phase=Impl::Phase::None;d->lastError=error(ErrorCode::Cancelled,"Update operation cancelled");
+    const CheckResult result{State::Cancelled,d->release,d->lastError,false};
+    const auto op=d->operation;
+    if(!d->transition(State::Cancelled,d->lastError.message))return;
+    if(d->operation!=op)return;
+    if(check)emit checkFinished(result);
+}
+}

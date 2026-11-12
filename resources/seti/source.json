@@ -1,0 +1,248 @@
+{
+  "theme": "Seti (Visual Studio Code)",
+  "extensionId": "vscode.vscode-theme-seti",
+  "sourceVersion": "https://github.com/jesseweed/seti-ui/commit/2d6c5e68b4ded73c92dac291845ee44e1182d511",
+  "fontTools": "4.61.0",
+  "themeSha256": "bbc6de399ac76b43a986237ae86dc714d0fee2df906924cba495d442b9a0066c",
+  "woffSha256": "b127762058f89b37b08d76185e3b0558f5c28859e39a3840a27cb28b9739d6e2",
+  "glyphs": 151,
+  "definitions": 383,
+  "languagePackages": [
+    {
+      "path": "bat/package.json",
+      "license": "MIT",
+      "sha256": "66ffb8129d72bb99b7a80d030ff364e71c17439dd800a61aa76dcc0cce54d414"
+    },
+    {
+      "path": "clojure/package.json",
+      "license": "MIT",
+      "sha256": "55c2cebdaea83c14f4557bedeccc1fe13c56934f3bee19f1527aa6c400b37940"
+    },
+    {
+      "path": "coffeescript/package.json",
+      "license": "MIT",
+      "sha256": "121e1b11cfbe47c821efd180e8f094162838166e00d69efd43497464d5917167"
+    },
+    {
+      "path": "configuration-editing/package.json",
+      "license": "MIT",
+      "sha256": "dcfab9e0ee216af4044a7876c956be1ac1fff69db446be173832fe9a2a6613bd"
+    },
+    {
+      "path": "cpp/package.json",
+      "license": "MIT",
+      "sha256": "d062980dcbd50e4afdd9ebe205344cd9d74a178769d5c084d4ad60451d14d810"
+    },
+    {
+      "path": "csharp/package.json",
+      "license": "MIT",
+      "sha256": "2c3900dc42fe4ac5fcb75519155817ebdfecc82394604038ce13c9d05045d41a"
+    },
+    {
+      "path": "css/package.json",
+      "license": "MIT",
+      "sha256": "89c6d5ccc0a41361d7e5714ca36671f5262d8f516a4d73cfb9a0d97b7ca3b31b"
+    },
+    {
+      "path": "dart/package.json",
+      "license": "MIT",
+      "sha256": "f58325879a6eb1e34d8af3f0089c9e8acf7ef05ee7f912909918b7a22b1b97c9"
+    },
+    {
+      "path": "docker/package.json",
+      "license": "MIT",
+      "sha256": "78324ede79c21541d88a9b171895ee915119e2b6e8b40b36386314d99aaf9ede"
+    },
+    {
+      "path": "dotenv/package.json",
+      "license": "MIT",
+      "sha256": "75c4e7e31c9606e1d17b70a60fbaa291549d9512d2ec2afaebe68067e0204f07"
+    },
+    {
+      "path": "extension-editing/package.json",
+      "license": "MIT",
+      "sha256": "d6aebb05c3cc3ba7b7167c56f07ed1b2aeab31ab08044e635dc0643d1ef80d49"
+    },
+    {
+      "path": "fsharp/package.json",
+      "license": "MIT",
+      "sha256": "9beaab63cea4945ba68d34a04e318b6d895e7ecddd9125a9e21282f152b9d0fb"
+    },
+    {
+      "path": "git-base/package.json",
+      "license": "MIT",
+      "sha256": "40070e223b059fa8f8716592b3da43795f37932f87d3e6a16a6509eecc8a049c"
+    },
+    {
+      "path": "go/package.json",
+      "license": "MIT",
+      "sha256": "8660e6a868df27ff6bb33d3e3b17c059979bc1bd9dcfa854a32b89b7683c8465"
+    },
+    {
+      "path": "groovy/package.json",
+      "license": "MIT",
+      "sha256": "404932c33ec06899163d7e19683ac94ff83adc73caf61fe8d8b1176cdf9ef6d8"
+    },
+    {
+      "path": "handlebars/package.json",
+      "license": "MIT",
+      "sha256": "1429a4d12d4a1c25010cc4e64f803a9883246d0b44b04a52d8f3894ab2ac48e3"
+    },
+    {
+      "path": "html/package.json",
+      "license": "MIT",
+      "sha256": "053502df0e3599d9937f58184dda3784f5d3df2b2bc3fa3c7db7cf25ae2e9299"
+    },
+    {
+      "path": "ini/package.json",
+      "license": "MIT",
+      "sha256": "2618b7826d41b4b81e149ad93b4b0a04f6aa26edba13f77dd0f92e14c715c66c"
+    },
+    {
+      "path": "java/package.json",
+      "license": "MIT",
+      "sha256": "0a7d7405a22a5cc7587852d8b0139486a2286fa06a1ae53ab00f47677192e7ab"
+    },
+    {
+      "path": "javascript/package.json",
+      "license": "MIT",
+      "sha256": "46497fcc12aaf67f4b6c5554250061f64b42f11711c2059960083f4e7bfb9f0b"
+    },
+    {
+      "path": "json/package.json",
+      "license": "MIT",
+      "sha256": "6df3ed7d55d66db89c2c55ca612367098093a6d207ba743e6e0ea6d2dbadfcda"
+    },
+    {
+      "path": "julia/package.json",
+      "license": "MIT",
+      "sha256": "372f535f84b1bedb59d5c638c0d35d0837849aa7a947138b42a266d1af59a034"
+    },
+    {
+      "path": "latex/package.json",
+      "license": "MIT",
+      "sha256": "3a03c9f44d869b0a4f2bb4a6030675accfc2382194e26acc51287c3249fa6f57"
+    },
+    {
+      "path": "less/package.json",
+      "license": "MIT",
+      "sha256": "417c62778b90f4493ba2d84cc2485ed6333db5d77d1f4fcf7cf7249270d06ceb"
+    },
+    {
+      "path": "lua/package.json",
+      "license": "MIT",
+      "sha256": "5d53744e0728b508f451b1b6505f7908d7ccfd9df6632b6cd0761e5e925b52ac"
+    },
+    {
+      "path": "make/package.json",
+      "license": "MIT",
+      "sha256": "527bf1e0b1bd20ee5d7b9cb2a57ffc7700033a67f2150dbc5af2a5f0b9daf718"
+    },
+    {
+      "path": "markdown-basics/package.json",
+      "license": "MIT",
+      "sha256": "3bdac026317b02487c3142e92802c71e27787410b6cbc97cda4ac91b5a528b67"
+    },
+    {
+      "path": "npm/package.json",
+      "license": "MIT",
+      "sha256": "c8a22d906f86febd7b533cb2f8161984040f1909b5f5de7c6585ff6ded3f5e9f"
+    },
+    {
+      "path": "objective-c/package.json",
+      "license": "MIT",
+      "sha256": "2237381cf95eb93926212edaa10cb68ee6f80bd627b2bb919c5d479e6e9682d8"
+    },
+    {
+      "path": "perl/package.json",
+      "license": "MIT",
+      "sha256": "c930d66c4c68f8dca9ba8a553cf1111f7b2c124100e3692fdfd2cb521b26aa88"
+    },
+    {
+      "path": "php/package.json",
+      "license": "MIT",
+      "sha256": "89ed11c388f6ed15c8812e83aceebf87e61f32aab639fb18f801bf67f566db01"
+    },
+    {
+      "path": "powershell/package.json",
+      "license": "MIT",
+      "sha256": "2a2129c2b298def75800e96565665391ef3818274497e2b2b92dd615a1c6aa8f"
+    },
+    {
+      "path": "prompt-basics/package.json",
+      "license": "MIT",
+      "sha256": "1805e488b226f5ba7f6f06f881736c2617cc1c095f2f0cbbaddf56a3984d6ceb"
+    },
+    {
+      "path": "pug/package.json",
+      "license": "MIT",
+      "sha256": "2338d284300a8c7942ce4b9ffe1bd28588bc6e100a099e146da6433a7790b023"
+    },
+    {
+      "path": "python/package.json",
+      "license": "MIT",
+      "sha256": "f773e6fe5de9ccfb23db98bf57ee99f8a1b721a43df94a6642300c83a44df48d"
+    },
+    {
+      "path": "r/package.json",
+      "license": "MIT",
+      "sha256": "2f967e508f7bb9fe4d3063c1a3e198b2b112d6f989898c616434f65e00fb868f"
+    },
+    {
+      "path": "razor/package.json",
+      "license": "MIT",
+      "sha256": "ab672fbe405a449d1578c2eb09adaf3187ad2d772229efe01f902004b47818a3"
+    },
+    {
+      "path": "ruby/package.json",
+      "license": "MIT",
+      "sha256": "56f84eacbf994cc977d6fe6a91d6007f58ff7675e00e617c87e9cdd9d204a1a4"
+    },
+    {
+      "path": "rust/package.json",
+      "license": "MIT",
+      "sha256": "611d667bd28e5b95b70922524799572cd2cebf89fff2f0668c7cab37968ef943"
+    },
+    {
+      "path": "scss/package.json",
+      "license": "MIT",
+      "sha256": "3cc4aabbb9a4bc9870fd246936024b076fbec6484a346c431cc5c8387bf06d24"
+    },
+    {
+      "path": "search-result/package.json",
+      "license": "MIT",
+      "sha256": "a7a4fd20f8a2b9cb5ab12f7e4b4579e67dde2074a7befc657ba69a5e3669793d"
+    },
+    {
+      "path": "shellscript/package.json",
+      "license": "MIT",
+      "sha256": "9de568c12f63ec2dc23e9e5c9da657e4cd4cba2bbc1ba447513fa9b72bfb2cc0"
+    },
+    {
+      "path": "sql/package.json",
+      "license": "MIT",
+      "sha256": "72c9a9c6d9a990e719dfff53c64105b22b6a0795178a26c99affe7c06b1ea660"
+    },
+    {
+      "path": "swift/package.json",
+      "license": "MIT",
+      "sha256": "075334e1e4e28543ff436f7d5c7361b8db828651e57f5e771d2c718d980fa2ab"
+    },
+    {
+      "path": "typescript-basics/package.json",
+      "license": "MIT",
+      "sha256": "6f8e666d1c6d177439a03b0c94c05b101ff1eb97c673cbddfc855e0c1b12430d"
+    },
+    {
+      "path": "xml/package.json",
+      "license": "MIT",
+      "sha256": "072e98c906b6fdade3f5cdbae9bea7e1908aaa01daf0c991ec97fe2d6258a410"
+    },
+    {
+      "path": "yaml/package.json",
+      "license": "MIT",
+      "sha256": "c25fbf7548ba848d167d114216db2e3d8440dab03f45ac4cdaadfd4ef2641e89"
+    }
+  ],
+  "conversion": "Unhinted original font-unit contours; Y flipped and aspect-preserving centered at runtime."
+}

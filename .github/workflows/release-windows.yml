@@ -1,0 +1,91 @@
+name: Windows portable Release
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable tag, for example v0.1.42
+        required: true
+      publish:
+        description: Publish the verified assets to a public GitHub Release
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          arch: win64_msvc2022_64
+          cache: true
+      - name: Validate tag against the source version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_TAG -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw 'A stable vX.Y.Z tag is required' }
+          $version = $env:RELEASE_TAG.Substring(1)
+          $definition = Get-Content CMakeLists.txt -Raw
+          if ($definition -notmatch 'project\(RabbitShell VERSION ([0-9.]+)') { throw 'Missing source version' }
+          if ($Matches[1] -ne $version) { throw 'Tag and source version do not match' }
+          "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+      - name: Build and package Windows x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install openssl:x64-windows
+          if ($LASTEXITCODE) { throw 'OpenSSL installation failed' }
+          $openssl = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows"
+          cmake -S . -B build -G 'Visual Studio 17 2022' -A x64 -T v143 "-DCMAKE_PREFIX_PATH=$env:QT_ROOT_DIR" "-DOPENSSL_ROOT_DIR=$openssl" -DRABBITSHELL_BUILD_TESTS=OFF
+          if ($LASTEXITCODE) { throw 'Configuration failed' }
+          $env:CL = '/MP4'
+          cmake --build build --config Release --target RabbitShell --parallel 4
+          if ($LASTEXITCODE) { throw 'Build failed' }
+          $directory = "$PWD/dist/FrogShell-$env:RELEASE_VERSION"
+          ./scripts/package-windows.ps1 -QtRoot $env:QT_ROOT_DIR -OpenSSLRoot $openssl -Version $env:RELEASE_VERSION -Destination $directory
+          Copy-Item docs/0.1.44-update.zh-CN.md "$directory/docs/"
+          $validationRecord = "FrogShell-${env:RELEASE_VERSION}验证记录.md"
+          if (!(Test-Path "docs/$validationRecord")) { throw "Missing release validation record: $validationRecord" }
+          Copy-Item -LiteralPath "docs/$validationRecord" -Destination "$directory/docs/" -Force
+          # Qt Network must have a usable TLS backend in the shipped payload.
+          if (!(Test-Path "$directory/tls/qschannelbackend.dll")) { throw 'Qt Schannel TLS backend missing' }
+          if (Test-Path "$openssl/bin/libssl-3-x64.dll") { Copy-Item "$openssl/bin/libssl-3-x64.dll" "$directory/" }
+          python -c "import sys,json; from pathlib import Path; sys.path.insert(0,'scripts'); from portable_format import source_inventory; v=sys.argv[1]; Path('build/release-inventory.json').write_text(json.dumps({'version':v,'files':source_inventory(Path('dist/FrogShell-'+v))}),encoding='utf-8')" $env:RELEASE_VERSION
+          if ($LASTEXITCODE) { throw 'Inventory failed' }
+          ./scripts/package-portable-windows.ps1 -PythonExe (Get-Command python).Source -Generator 'Visual Studio 17 2022' -Toolset v143 -Version $env:RELEASE_VERSION -Source $directory -Manifest "$PWD/build/release-inventory.json"
+          python scripts/verify-package.py $directory build/directory-smoke
+          if ($LASTEXITCODE) { throw 'Directory smoke failed' }
+          python scripts/smoke-portable-release.py --exe "dist/FrogShell-$env:RELEASE_VERSION-portable.exe" --manifest "build/portable-$env:RELEASE_VERSION/generated/payload-manifest.json" --report build/portable-smoke
+          if ($LASTEXITCODE) { throw 'Portable smoke failed' }
+          $name = "FrogShell-$env:RELEASE_VERSION-portable.exe"
+          $digest = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$digest  $name" | Set-Content dist/SHA256SUMS -Encoding utf8NoBOM
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FrogShell-${{ env.RELEASE_VERSION }}-windows-x64
+          path: |
+            dist/FrogShell-${{ env.RELEASE_VERSION }}-portable.exe
+            dist/SHA256SUMS
+            build/*-smoke/*.json
+      - name: Publish assets for the verified tag
+        if: github.event_name == 'push' || inputs.publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release create $env:RELEASE_TAG "dist/FrogShell-$env:RELEASE_VERSION-portable.exe" dist/SHA256SUMS --verify-tag --generate-notes --title "FrogShell $env:RELEASE_VERSION"
+          if ($LASTEXITCODE) { throw 'Release publication failed; existing assets are never overwritten' }

@@ -1,0 +1,500 @@
+{
+  "product": "FrogShell",
+  "source": "source.png (user-provided clipboard image, unmodified)",
+  "original_clipboard_path": "C:/Users/JOKER/AppData/Local/Temp/codex-clipboard-dfc88260-6c81-419b-936f-db6381896632.png",
+  "source_sha256": "b64a56e2f10765c1afca6df65eb55c5a96b0f9830c9f53de20a8caa48ea8d6d5",
+  "source_size": [
+    1313,
+    1198
+  ],
+  "source_mode": "RGB",
+  "png_size": [
+    1024,
+    1024
+  ],
+  "png_mode": "RGBA",
+  "icon_sizes": [
+    [
+      16,
+      16
+    ],
+    [
+      24,
+      24
+    ],
+    [
+      32,
+      32
+    ],
+    [
+      48,
+      48
+    ],
+    [
+      64,
+      64
+    ],
+    [
+      128,
+      128
+    ],
+    [
+      256,
+      256
+    ]
+  ],
+  "checks": {
+    "corner": {
+      "point": [
+        0,
+        0
+      ],
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "belly": {
+      "point": [
+        460,
+        506
+      ],
+      "rgba": [
+        254,
+        245,
+        237,
+        255
+      ]
+    },
+    "eye_white": {
+      "point": [
+        245,
+        168
+      ],
+      "rgba": [
+        254,
+        254,
+        254,
+        255
+      ]
+    }
+  },
+  "transparent_pixels": 438260,
+  "partially_transparent_pixels": 12418,
+  "dependencies": "Pillow and NumPy; bundled Codex Python; no installation required",
+  "icns": {
+    "file": "frogshell.icns",
+    "source": "frogshell.png",
+    "source_sha256": "7d203b67a38d755fadd0bd528420ad09cc46ace352ade6da9aa903889a9549a6",
+    "sha256": "cbacec542fe719938d6e915edf2007ea1a32b9d6e49ab30308090b7e9a4a7e68",
+    "bytes": 1248494,
+    "encoder": "Pillow ICNS with explicit Lanczos RGBA append_images; lossless embedded PNG layers",
+    "container_types": [
+      "TOC ",
+      "ic07",
+      "ic08",
+      "ic09",
+      "ic10",
+      "ic11",
+      "ic12",
+      "ic13",
+      "ic14"
+    ],
+    "pixel_sizes": [
+      32,
+      64,
+      128,
+      256,
+      512,
+      1024
+    ],
+    "layers": [
+      {
+        "logical_size": [
+          16,
+          16
+        ],
+        "scale": 2,
+        "pixel_size": [
+          32,
+          32
+        ],
+        "mode": "RGBA",
+        "corner_alpha": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "checks": {
+          "belly": {
+            "point": [
+              14,
+              16
+            ],
+            "rgba": [
+              251,
+              244,
+              235,
+              255
+            ]
+          },
+          "eye_white": {
+            "point": [
+              8,
+              5
+            ],
+            "rgba": [
+              67,
+              60,
+              75,
+              255
+            ]
+          }
+        },
+        "transparent_pixels": 265,
+        "partially_transparent_pixels": 325,
+        "matches_lanczos_source_pixels": true
+      },
+      {
+        "logical_size": [
+          32,
+          32
+        ],
+        "scale": 2,
+        "pixel_size": [
+          64,
+          64
+        ],
+        "mode": "RGBA",
+        "corner_alpha": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "checks": {
+          "belly": {
+            "point": [
+              29,
+              32
+            ],
+            "rgba": [
+              253,
+              245,
+              237,
+              255
+            ]
+          },
+          "eye_white": {
+            "point": [
+              15,
+              10
+            ],
+            "rgba": [
+              255,
+              255,
+              255,
+              255
+            ]
+          }
+        },
+        "transparent_pixels": 1384,
+        "partially_transparent_pixels": 672,
+        "matches_lanczos_source_pixels": true
+      },
+      {
+        "logical_size": [
+          128,
+          128
+        ],
+        "scale": 1,
+        "pixel_size": [
+          128,
+          128
+        ],
+        "mode": "RGBA",
+        "corner_alpha": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "checks": {
+          "belly": {
+            "point": [
+              58,
+              63
+            ],
+            "rgba": [
+              253,
+              245,
+              237,
+              255
+            ]
+          },
+          "eye_white": {
+            "point": [
+              31,
+              21
+            ],
+            "rgba": [
+              251,
+              251,
+              251,
+              255
+            ]
+          }
+        },
+        "transparent_pixels": 6229,
+        "partially_transparent_pixels": 1370,
+        "matches_lanczos_source_pixels": true
+      },
+      {
+        "logical_size": [
+          128,
+          128
+        ],
+        "scale": 2,
+        "pixel_size": [
+          256,
+          256
+        ],
+        "mode": "RGBA",
+        "corner_alpha": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "checks": {
+          "belly": {
+            "point": [
+              115,
+              126
+            ],
+            "rgba": [
+              253,
+              246,
+              237,
+              255
+            ]
+          },
+          "eye_white": {
+            "point": [
+              61,
+              42
+            ],
+            "rgba": [
+              254,
+              254,
+              255,
+              255
+            ]
+          }
+        },
+        "transparent_pixels": 26308,
+        "partially_transparent_pixels": 2761,
+        "matches_lanczos_source_pixels": true
+      },
+      {
+        "logical_size": [
+          256,
+          256
+        ],
+        "scale": 1,
+        "pixel_size": [
+          256,
+          256
+        ],
+        "mode": "RGBA",
+        "corner_alpha": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "checks": {
+          "belly": {
+            "point": [
+              115,
+              126
+            ],
+            "rgba": [
+              253,
+              246,
+              237,
+              255
+            ]
+          },
+          "eye_white": {
+            "point": [
+              61,
+              42
+            ],
+            "rgba": [
+              254,
+              254,
+              255,
+              255
+            ]
+          }
+        },
+        "transparent_pixels": 26308,
+        "partially_transparent_pixels": 2761,
+        "matches_lanczos_source_pixels": true
+      },
+      {
+        "logical_size": [
+          256,
+          256
+        ],
+        "scale": 2,
+        "pixel_size": [
+          512,
+          512
+        ],
+        "mode": "RGBA",
+        "corner_alpha": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "checks": {
+          "belly": {
+            "point": [
+              230,
+              253
+            ],
+            "rgba": [
+              254,
+              245,
+              237,
+              255
+            ]
+          },
+          "eye_white": {
+            "point": [
+              122,
+              84
+            ],
+            "rgba": [
+              254,
+              254,
+              255,
+              255
+            ]
+          }
+        },
+        "transparent_pixels": 107859,
+        "partially_transparent_pixels": 5782,
+        "matches_lanczos_source_pixels": true
+      },
+      {
+        "logical_size": [
+          512,
+          512
+        ],
+        "scale": 1,
+        "pixel_size": [
+          512,
+          512
+        ],
+        "mode": "RGBA",
+        "corner_alpha": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "checks": {
+          "belly": {
+            "point": [
+              230,
+              253
+            ],
+            "rgba": [
+              254,
+              245,
+              237,
+              255
+            ]
+          },
+          "eye_white": {
+            "point": [
+              122,
+              84
+            ],
+            "rgba": [
+              254,
+              254,
+              255,
+              255
+            ]
+          }
+        },
+        "transparent_pixels": 107859,
+        "partially_transparent_pixels": 5782,
+        "matches_lanczos_source_pixels": true
+      },
+      {
+        "logical_size": [
+          512,
+          512
+        ],
+        "scale": 2,
+        "pixel_size": [
+          1024,
+          1024
+        ],
+        "mode": "RGBA",
+        "corner_alpha": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "checks": {
+          "belly": {
+            "point": [
+              460,
+              506
+            ],
+            "rgba": [
+              254,
+              245,
+              237,
+              255
+            ]
+          },
+          "eye_white": {
+            "point": [
+              245,
+              168
+            ],
+            "rgba": [
+              254,
+              254,
+              254,
+              255
+            ]
+          }
+        },
+        "transparent_pixels": 438260,
+        "partially_transparent_pixels": 12418,
+        "matches_lanczos_source_pixels": true
+      }
+    ],
+    "master_1024_pixels_identical": true,
+    "protected_asset_sha256": {
+      "source.png": "b64a56e2f10765c1afca6df65eb55c5a96b0f9830c9f53de20a8caa48ea8d6d5",
+      "frogshell.png": "7d203b67a38d755fadd0bd528420ad09cc46ace352ade6da9aa903889a9549a6",
+      "frogshell.ico": "e63ea34a0d0feab6a88c61490858d52dc23904f3fe6da45f491e876db2f7f3aa"
+    },
+    "rebuild": "build_icons.py --icns-only",
+    "preview": "test-results/0.1.39/branding-assets/preview-icns-light-dark.png"
+  }
+}

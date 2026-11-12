@@ -1,0 +1,30 @@
+#include <windows.h>
+1 ICON "@PORTABLE_GENERATED_DIR@/RabbitShell.ico"
+1 RT_MANIFEST "@CMAKE_CURRENT_SOURCE_DIR@/launcher.manifest"
+101 RCDATA "@PORTABLE_GENERATED_DIR@/payload.bin"
+1 VERSIONINFO
+FILEVERSION @PORTABLE_VERSION_COMMAS@,0
+PRODUCTVERSION @PORTABLE_VERSION_COMMAS@,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "@PORTABLE_PRODUCT_NAME@"
+            VALUE "FileDescription", "@PORTABLE_PRODUCT_NAME@ portable launcher"
+            VALUE "FileVersion", "@PORTABLE_VERSION@.0"
+            VALUE "InternalName", "RabbitShellPortable"
+            VALUE "OriginalFilename", "@PORTABLE_OUTPUT_NAME@.exe"
+            VALUE "ProductName", "@PORTABLE_PRODUCT_NAME@"
+            VALUE "ProductVersion", "@PORTABLE_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

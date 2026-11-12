@@ -1,0 +1,8 @@
+.tools/
+build*/
+dist/
+*.user
+__pycache__/
+*.log
+third_party/*.tar.gz
+test-results/
