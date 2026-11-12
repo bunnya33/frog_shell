@@ -26,23 +26,37 @@ class CodeDocumentLayout final : public QPlainTextDocumentLayout {
         auto rect = QPlainTextDocumentLayout::blockBoundingRect(block);
         if (rect.isEmpty() || !block.isVisible() || block.layout()->lineCount() != 1) return rect;
         const auto font = document()->defaultFont();
-        const QFontMetricsF metrics(font, paintDevice());
-        const int pixels = font.pixelSize() > 0 ? font.pixelSize() : QFontInfo(font).pixelSize();
-        const qreal target = qMax(1, qRound(pixels * 19.0 / 14.0));
+        auto device = paintDevice();
+        const int dpiX = device ? device->logicalDpiX() : 0, dpiY = device ? device->logicalDpiY() : 0;
+        if (!metricsValid || font != metricsFont || device != metricsDevice || dpiX != metricsDpiX || dpiY != metricsDpiY) {
+            const QFontMetricsF metrics(font, device);
+            const int pixels = font.pixelSize() > 0 ? font.pixelSize() : QFontInfo(font).pixelSize();
+            targetHeight = qMax(1, qRound(pixels * 19.0 / 14.0));
+            fontHeight = metrics.height(); fontAscent = metrics.ascent(); metricsFont = font;
+            metricsDevice = device; metricsDpiX = dpiX; metricsDpiY = dpiY; metricsValid = true;
+        }
         auto line = block.layout()->lineAt(0);
         const qreal bottomMargin = block.next().isValid() ? 0 : document()->documentMargin();
         // The base rect includes our previous line position. Remove it before
         // computing fresh padding, including after a font/zoom change.
         const qreal naturalHeight = rect.height() - bottomMargin - line.y();
-        const qreal baseline = qMax(line.ascent(), qreal(qCeil(qMax(qreal(0), (target - metrics.height()) / 2) + metrics.ascent())));
-        line.setPosition(QPointF(line.x(), baseline - line.ascent()));
-        rect.setHeight(qMax(target, line.y() + naturalHeight) + bottomMargin);
+        const qreal baseline = qMax(line.ascent(), qreal(qCeil(qMax(qreal(0), (targetHeight - fontHeight) / 2) + fontAscent)));
+        const qreal lineY = baseline - line.ascent();
+        if (line.y() != lineY) line.setPosition(QPointF(line.x(), lineY));
+        rect.setHeight(qMax(targetHeight, line.y() + naturalHeight) + bottomMargin);
         return rect;
     }
     void refreshMetrics() {
+        metricsValid = false;
         emit documentSizeChanged(documentSize()); // Recompute the viewport's line-based scrollbar range.
         requestUpdate();
     }
+  private:
+    mutable bool metricsValid = false;
+    mutable QFont metricsFont;
+    mutable const QPaintDevice *metricsDevice = nullptr;
+    mutable int metricsDpiX = 0, metricsDpiY = 0;
+    mutable qreal targetHeight = 0, fontHeight = 0, fontAscent = 0;
 };
 class EditorTabBar final : public PanelTabBar {
   public:
@@ -141,10 +155,10 @@ CodeEdit::CodeEdit(QWidget *p) : QPlainTextEdit(p) {
     syntaxTimer->setSingleShot(true);
     syntaxTimer->setInterval(300);
     connect(syntaxTimer, &QTimer::timeout, this, &CodeEdit::startSyntax);
-    connect(document(), &QTextDocument::contentsChange, this, [this](int, int removed, int added) {
+    connect(document(), &QTextDocument::contentsChange, this, [this](int position, int removed, int added) {
         // Highlighter/theme format refreshes can emit contentsChanged without
         // changing text. They must not clear or reschedule a valid diagnostic.
-        if (removed || added) scheduleSyntax();
+        if (removed || added) { adjustAdvancedSearch(position, removed, added); scheduleSyntax(); }
     });
     viewport()->installEventFilter(this);
     setAccessibleName("文件编辑器");
@@ -158,8 +172,8 @@ CodeEdit::CodeEdit(QWidget *p) : QPlainTextEdit(p) {
         if (searchSelection) {
             searchSelection = false;
             updateHighlights();
-        }
-        viewport()->update();
+        } else updateSearchSelectionStyle();
+        updateCursorOutline();
     };
     connect(this, &QPlainTextEdit::cursorPositionChanged, this, cursorChanged);
     connect(this, &QPlainTextEdit::selectionChanged, this, cursorChanged);
@@ -379,22 +393,96 @@ void CodeEdit::paintMatches(){
     updateHighlights();
     findStatus->setText(matches.isEmpty()?QString("无结果"):QString("%1 / %2").arg(currentMatch+1).arg(matches.size()));
 }
+void CodeEdit::setAdvancedSearch(const SearchOutcome &result) {
+    advancedRanges.clear(); advancedCurrent = {}; advancedCurrentRow = -1;
+    const int end = document()->characterCount() - 1;
+    for (int row = 0; row < result.lines.size(); ++row) {
+        const auto &line = result.lines[row];
+        for (const auto &span : line.spans) {
+            const qint64 start = qint64(line.offset) + span.start, finish = start + span.length;
+            if (span.length <= 0 || start < 0 || finish > end || span.start < 0 ||
+                qint64(span.start) + span.length > line.text.size()) continue;
+            QTextCursor cursor(document()); cursor.setPosition(int(start)); cursor.setPosition(int(finish), QTextCursor::KeepAnchor);
+            advancedRanges.append({cursor, line.text.mid(span.start, span.length), int(start), int(finish), row});
+        }
+    }
+    updateHighlights();
+}
+void CodeEdit::clearAdvancedSearch() {
+    advancedRanges.clear(); advancedCurrent = {}; advancedCurrentRow = -1; updateHighlights();
+}
+void CodeEdit::setAdvancedSearchCurrent(int row, const QTextCursor &cursor) {
+    advancedCurrentRow = row; advancedCurrent = cursor;
+    for (auto &range : advancedRanges) range.current = range.row == row && range.start == cursor.selectionStart() && range.end == cursor.selectionEnd();
+    updateHighlights();
+}
+void CodeEdit::adjustAdvancedSearch(int position, int removed, int added) {
+    if (advancedRanges.isEmpty() && advancedCurrent.isNull()) return;
+    const int changeEnd = position + removed;
+    for (int i = advancedRanges.size() - 1; i >= 0; --i) {
+        auto &range = advancedRanges[i];
+        // A change inside a hit invalidates it, even if the replacement happens
+        // to contain the same characters. Boundary insertions belong outside it.
+        if ((removed && position < range.end && changeEnd > range.start) ||
+            (added && position > range.start && position < range.end)) {
+            advancedRanges.removeAt(i); continue;
+        }
+        if (changeEnd <= range.start) { range.start += added - removed; range.end += added - removed; }
+        if (range.start < 0 || range.end > document()->characterCount() - 1 || range.start >= range.end) {
+            advancedRanges.removeAt(i); continue;
+        }
+        range.cursor = QTextCursor(document()); range.cursor.setPosition(range.start);
+        range.cursor.setPosition(range.end, QTextCursor::KeepAnchor);
+        if (range.cursor.selectedText() != range.text) advancedRanges.removeAt(i);
+    }
+    // A zero-width current result has no painted token; discard its context on
+    // edits. Otherwise retain it only while its exact tracked hit still exists.
+    bool found = false;
+    for (const auto &range : advancedRanges) {
+        if (range.current) { advancedCurrent = range.cursor; found = true; break; }
+    }
+    if (!found) { advancedCurrent = {}; advancedCurrentRow = -1; }
+    updateHighlights();
+}
+void CodeEdit::appendSearchLineHighlights(QList<QTextEdit::ExtraSelection> &selections, int position) {
+    const auto block = document()->findBlock(position);
+    if (!block.isValid()) return;
+    // QPlainTextEdit only expands FullWidthSelection to a visual line when
+    // the cursor is empty. Ensure the block is laid out, then give each wrap
+    // line its own cursor so its trailing whitespace is painted too.
+    blockBoundingRect(block);
+    const auto layout = block.layout();
+    const int count = qMax(1, layout->lineCount());
+    for (int i = 0; i < count; ++i) {
+        QTextEdit::ExtraSelection line;
+        line.cursor = QTextCursor(document());
+        line.cursor.setPosition(block.position() + (layout->lineCount() ? layout->lineAt(i).textStart() : 0));
+        line.format.setProperty(QTextFormat::FullWidthSelection, true);
+        line.format.setBackground(QColor(lightTheme() ? "#f0edf8" : "#363447"));
+        selections.append(line);
+    }
+}
 void CodeEdit::updateHighlights() {
+    ++highlightRebuildCount;
     QList<QTextEdit::ExtraSelection> selections;
     const bool activeSearch = findPanel && findPanel->isVisible() && searchSelection &&
                               currentMatch >= 0 && currentMatch < matches.size() &&
                               matches[currentMatch].start >= 0 &&
                               matches[currentMatch].end <= document()->characterCount() - 1;
-    const QColor currentColor(lightTheme() ? "#e4b85e" : "#8d6840");
+    const QColor currentColor("#eaa13b");
     if (activeSearch) {
-        QTextEdit::ExtraSelection line;
-        line.cursor = QTextCursor(document());
-        line.cursor.setPosition(matches[currentMatch].start);
-        line.format.setProperty(QTextFormat::FullWidthSelection, true);
-        line.format.setBackground(QColor(lightTheme() ? "#f2f4f6" : "#323443"));
-        selections.append(line);
+        appendSearchLineHighlights(selections, matches[currentMatch].start);
     }
-    for(int i=0;i<matches.size();++i){if(matches[i].start<0||matches[i].end>document()->characterCount()-1||matches[i].start>=matches[i].end)continue;QTextEdit::ExtraSelection s;s.cursor=QTextCursor(document());s.cursor.setPosition(matches[i].start);s.cursor.setPosition(matches[i].end,QTextCursor::KeepAnchor);s.format.setBackground(i==currentMatch?currentColor:QColor(lightTheme()?"#f7df91":"#665a36"));selections.append(s);}
+    if (!activeSearch && !advancedCurrent.isNull()) {
+        appendSearchLineHighlights(selections, advancedCurrent.selectionStart());
+    }
+    const QColor advancedColor("#f6d75d"), advancedCurrentColor("#eaa13b"), advancedInk("#211806");
+    for (const auto &range : advancedRanges) {
+        QTextEdit::ExtraSelection s; s.cursor = range.cursor;
+        s.format.setBackground(range.current ? advancedCurrentColor : advancedColor); s.format.setForeground(advancedInk);
+        selections.append(s);
+    }
+    for(int i=0;i<matches.size();++i){if(matches[i].start<0||matches[i].end>document()->characterCount()-1||matches[i].start>=matches[i].end)continue;QTextEdit::ExtraSelection s;s.cursor=QTextCursor(document());s.cursor.setPosition(matches[i].start);s.cursor.setPosition(matches[i].end,QTextCursor::KeepAnchor);s.format.setBackground(i==currentMatch?currentColor:QColor("#f6d75d"));s.format.setForeground(QColor("#211806"));selections.append(s);}
     if (syntaxResult.error) {
         const int pos = qBound(0, syntaxResult.offset, document()->characterCount() - 1);
         const auto block = document()->findBlock(pos);
@@ -413,15 +501,38 @@ void CodeEdit::updateHighlights() {
     // search cursor (and replace semantics), but give only that selection the
     // same color as the current match. Restore the application style as soon
     // as the user changes the selection or search is cleared.
-    const QString sheet = activeSearch && textCursor().hasSelection()
-        ? QStringLiteral("QPlainTextEdit { selection-background-color: %1; }").arg(currentColor.name())
-        : QString();
+    updateSearchSelectionStyle();
+    viewport()->update();
+}
+void CodeEdit::updateSearchSelectionStyle() {
+    const auto selection = textCursor();
+    const bool advancedSelected = !advancedCurrent.isNull() && selection.hasSelection() &&
+        selection.selectionStart() == advancedCurrent.selectionStart() && selection.selectionEnd() == advancedCurrent.selectionEnd();
+    const bool activeSearch = findPanel && findPanel->isVisible() && searchSelection &&
+        currentMatch >= 0 && currentMatch < matches.size() && matches[currentMatch].start >= 0 &&
+        matches[currentMatch].end <= document()->characterCount() - 1;
+    const bool wanted = advancedSelected || (activeSearch && selection.hasSelection());
+    if (wanted == searchSelectionStyle) return;
+    // Set this before changing the style: style changes can synchronously
+    // trigger more widget events. All current search selections share a color.
+    searchSelectionStyle = wanted;
+    const QString sheet = wanted ? QStringLiteral("QPlainTextEdit { selection-background-color: #eaa13b; selection-color: #211806; }") : QString();
     if (styleSheet() != sheet) {
         const QFont contentFont = font();
         setStyleSheet(sheet);
         if (font() != contentFont) setFont(contentFont);
     }
-    viewport()->update();
+}
+void CodeEdit::updateCursorOutline() {
+    const auto cursor = textCursor();
+    const QTextBlock next = hasFocus() && !cursor.hasSelection() && !searchSelection ? cursor.block() : QTextBlock();
+    if (next == outlinedBlock) return;
+    auto repaintBlock = [this](const QTextBlock &block) {
+        if (!block.isValid() || block.document() != document() || !block.isVisible()) return;
+        const QRect rect = blockBoundingGeometry(block).translated(contentOffset()).toAlignedRect();
+        viewport()->update(QRect(0, rect.top() - 2, viewport()->width(), rect.height() + 4));
+    };
+    repaintBlock(outlinedBlock); repaintBlock(next); outlinedBlock = next;
 }
 QString CodeEdit::replacementFor(const Match &match) const {
     QString out=replacement->text();
@@ -456,6 +567,7 @@ bool CodeEdit::event(QEvent *event) {
     switch (event->type()) {
     case QEvent::FocusIn:
     case QEvent::FocusOut:
+        updateCursorOutline();
         viewport()->update();
         break;
     case QEvent::FontChange:
@@ -468,6 +580,8 @@ bool CodeEdit::event(QEvent *event) {
             setTabStopDistance(QFontMetricsF(font(), viewport()).horizontalAdvance(' ') * 4);
             updateGutter();
             lineNumbers->update();
+            if (event->type() != QEvent::StyleChange && lineWrapMode() != NoWrap &&
+                (searchSelection || !advancedCurrent.isNull())) updateHighlights();
         }
         break;
     default: break;
@@ -481,7 +595,7 @@ void CodeEdit::paintEvent(QPaintEvent *event) {
         const auto block = textCursor().block();
         if (!block.isValid() || !block.isVisible()) return;
         const QRectF bounds = blockBoundingGeometry(block).translated(contentOffset());
-        qreal height = blockBoundingRect(block).height();
+        qreal height = bounds.height();
         if (!block.next().isValid()) height -= document()->documentMargin();
         const qreal scale = viewport()->devicePixelRatioF();
         const qreal pixel = 1.0 / scale;
@@ -535,6 +649,7 @@ void CodeEdit::paintLineNumbers(QPaintEvent *event) {
     painter.fillRect(event->rect(), c.background);
     painter.setPen(c.muted);
     painter.setFont(font());
+    const QFontMetricsF metrics(font());
     auto block = firstVisibleBlock();
     int number = block.blockNumber();
     qreal top = blockBoundingGeometry(block).translated(contentOffset()).top();
@@ -543,11 +658,11 @@ void CodeEdit::paintLineNumbers(QPaintEvent *event) {
         if (block.isVisible() && top + height >= event->rect().top() && block.layout()->lineCount()) {
             const auto line = block.layout()->lineAt(0);
             const auto text = QString::number(number + 1);
-            painter.drawText(QPointF(lineNumbers->width() - uiPx(8) - QFontMetricsF(font()).horizontalAdvance(text),
+            painter.drawText(QPointF(lineNumbers->width() - uiPx(8) - metrics.horizontalAdvance(text),
                                      top + line.y() + line.ascent()), text);
         }
+        top += height;
         block = block.next();
-        if (block.isValid()) top = blockBoundingGeometry(block).translated(contentOffset()).top();
         ++number;
     }
 }
@@ -570,7 +685,7 @@ void CodeEdit::locate(bool back) {
         if(back){currentMatch=matches.size()-1;for(int i=matches.size()-1;i>=0;--i)if(matches[i].end<=position){currentMatch=i;break;}}
         else for(int i=0;i<matches.size();++i)if(matches[i].start>=position){currentMatch=i;break;}
     }else currentMatch=(currentMatch+(back?-1:1)+matches.size())%matches.size();
-    const auto &match=matches[currentMatch];QTextCursor c(document());c.setPosition(match.start);c.setPosition(match.end,QTextCursor::KeepAnchor);locatingMatch=true;setTextCursor(c);locatingMatch=false;searchSelection=true;ensureCursorVisible();paintMatches();
+    const auto &match=matches[currentMatch];QTextCursor c(document());c.setPosition(match.start);c.setPosition(match.end,QTextCursor::KeepAnchor);locatingMatch=true;setTextCursor(c);locatingMatch=false;searchSelection=true;centerCursor();paintMatches();
 }
 void CodeEdit::resizeEvent(QResizeEvent *e) {
     QPlainTextEdit::resizeEvent(e);
@@ -579,6 +694,7 @@ void CodeEdit::resizeEvent(QResizeEvent *e) {
         findPanel->setFixedWidth(qMax(uiPx(120),qMin(uiPx(520),width()-uiPx(24))));
         findPanel->move(qMax(0, width() - findPanel->width() - uiPx(18)), uiPx(4));
     }
+    if (lineWrapMode() != NoWrap && (searchSelection || !advancedCurrent.isNull())) updateHighlights();
 }
 void CodeEdit::keyPressEvent(QKeyEvent *e) {
     if((e->key()==Qt::Key_Return||e->key()==Qt::Key_Enter)&&findPanel&&findPanel->isVisible()&&findPanel->isAncestorOf(QApplication::focusWidget())){

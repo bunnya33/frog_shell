@@ -164,15 +164,15 @@ class ReleaseUpdateTests : public QObject {
         QCOMPARE(portableAssetName("0.1.42","windows","x86_64"),name);
         QVERIFY(portableAssetName("0.1.42","windows","arm64")!=name);
     }
-    void offlineAndDailySchedule() {
+    void offlineAndHalfHourSchedule() {
         FixtureTransport transport(fixture);Client empty(Config{},nullptr,&transport);QSignalSpy unconfigured(&empty,&Client::checkFinished);
         empty.check();QCOMPARE(empty.state(),State::Unconfigured);QCOMPARE(unconfigured.size(),1);QVERIFY(transport.logical.isEmpty());
         Client c(cfg,nullptr,&transport);Schedule s;s.nowUtc=QDateTime::fromString("2026-11-11T10:00:00Z",Qt::ISODate);
         c.check(CheckMode::Automatic,s);QCOMPARE(c.state(),State::Disabled);QVERIFY(transport.logical.isEmpty());
-        s.automaticEnabled=true;s.lastAutomaticAttemptUtc=s.nowUtc.addSecs(-86399);
+        s.automaticEnabled=true;s.lastAutomaticAttemptUtc=s.nowUtc.addSecs(-1799);
         c.check(CheckMode::Automatic,s);QCOMPARE(c.state(),State::Throttled);QVERIFY(transport.logical.isEmpty());
         s.lastAutomaticAttemptUtc=s.nowUtc.addDays(1);c.check(CheckMode::Automatic,s);QCOMPARE(c.state(),State::Throttled);
-        s.lastAutomaticAttemptUtc=s.nowUtc.addSecs(-86400);s.lastNotifiedVersion="0.1.42";
+        s.lastAutomaticAttemptUtc=s.nowUtc.addSecs(-1800);s.lastNotifiedVersion="0.1.42";
         QSignalSpy attempts(&c,&Client::automaticAttemptStarted),done(&c,&Client::checkFinished);
         c.check(CheckMode::Automatic,s);QTRY_COMPARE_WITH_TIMEOUT(done.size(),1,3000);QCOMPARE(attempts.size(),1);QCOMPARE(c.state(),State::Available);
         QVERIFY(!qvariant_cast<CheckResult>(done.first().first()).shouldNotify);
@@ -180,6 +180,44 @@ class ReleaseUpdateTests : public QObject {
         QCOMPARE(c.state(),State::Throttled);QCOMPARE(transport.logical.size(),autoRequests);
         QSignalSpy manual(&c,&Client::checkFinished);c.check(CheckMode::Manual,s);QTRY_COMPARE_WITH_TIMEOUT(manual.size(),1,3000);
         QVERIFY(qvariant_cast<CheckResult>(manual.first().first()).shouldNotify);
+    }
+    void startupScheduleAndCooldown() {
+        FixtureTransport transport(fixture);Schedule s;s.automaticEnabled=true;
+        s.nowUtc=QDateTime::fromString("2026-11-11T10:00:00Z",Qt::ISODate);
+        s.lastAutomaticAttemptUtc=s.nowUtc.addSecs(-5);s.lastNotifiedVersion="0.1.42";
+        Client c(cfg,nullptr,&transport);QSignalSpy attempts(&c,&Client::automaticAttemptStarted),done(&c,&Client::checkFinished);
+        c.check(CheckMode::Startup,s);QTRY_COMPARE_WITH_TIMEOUT(done.size(),1,3000);
+        QCOMPARE(attempts.size(),1);QCOMPARE(c.state(),State::Available);
+        QVERIFY(!qvariant_cast<CheckResult>(done.first().first()).shouldNotify);
+        const auto count=transport.logical.size();c.check(CheckMode::Startup,s);QCOMPARE(transport.logical.size(),count);QCOMPARE(c.state(),State::Throttled);
+        s.nowUtc=s.nowUtc.addSecs(1799);c.check(CheckMode::Automatic,s);QCOMPARE(transport.logical.size(),count);
+        s.nowUtc=s.nowUtc.addSecs(1);meta(metadata("0.1.43"));c.check(CheckMode::Automatic,s);QTRY_COMPARE_WITH_TIMEOUT(attempts.size(),2,3000);
+        QTRY_VERIFY_WITH_TIMEOUT(!c.busy(),3000);QCOMPARE(transport.logical.size(),count+1);
+        QCOMPARE(c.release().version,QString("0.1.43"));QVERIFY(qvariant_cast<CheckResult>(done.last().first()).shouldNotify);
+        Client disabled(cfg,nullptr,&transport);s.automaticEnabled=false;const auto after=transport.logical.size();
+        disabled.check(CheckMode::Startup,s);QCOMPARE(disabled.state(),State::Disabled);QCOMPARE(transport.logical.size(),after);
+        Client cooled(cfg,nullptr,&transport);s.automaticEnabled=true;s.rateLimitUntilUtc=s.nowUtc.addSecs(120);
+        cooled.check(CheckMode::Startup,s);QCOMPARE(cooled.state(),State::Throttled);QCOMPARE(cooled.lastError().code,ErrorCode::RateLimited);QCOMPARE(transport.logical.size(),after);
+        cooled.check(CheckMode::Manual,s);QCOMPARE(cooled.state(),State::Throttled);QCOMPARE(transport.logical.size(),after);
+        Client sameProcess(cfg,nullptr,&transport);s.rateLimitUntilUtc={};s.lastAutomaticAttemptUtc={};
+        QSignalSpy first(&sameProcess,&Client::checkFinished);sameProcess.check(CheckMode::Automatic,s);
+        QTRY_COMPARE_WITH_TIMEOUT(first.size(),1,3000);const auto started=transport.logical.size();
+        sameProcess.check(CheckMode::Startup,s);QCOMPARE(sameProcess.state(),State::Throttled);QCOMPARE(transport.logical.size(),started);
+    }
+    void portableChosenAlongsideSetup() {
+        const auto setup=QStringLiteral("FrogShell-0.1.42-setup.exe");
+        const auto list=sha(QByteArray("setup")).toHex()+"  "+setup.toUtf8()+"\n"+sha(payload).toHex()+"  "+name.toUtf8()+"\n";
+        const QString path="/fixture/project/releases/download/v0.1.42/SHA256SUMS";
+        for(bool digest:{true,false}) {
+            auto o=metadata("0.1.42",digest);auto assets=o["assets"].toArray();
+            assets.prepend(QJsonObject{{"name",setup},{"size",5},{"digest","sha256:"+QString::fromLatin1(sha(QByteArray("setup")).toHex())},
+                {"browser_download_url","https://github.com/fixture/project/releases/download/v0.1.42/"+setup}});
+            assets.append(QJsonObject{{"name","SHA256SUMS"},{"size",list.size()},{"browser_download_url","https://github.com"+path}});
+            o["assets"]=assets;meta(o);fixture.routes[path]=Response{200,list};
+            FixtureTransport transport(fixture);Client c(cfg,nullptr,&transport);available(c);
+            QCOMPARE(c.release().assetName,name);QCOMPARE(c.release().downloadUrl.path(),assetPath);QCOMPARE(c.release().sha256,sha(payload));
+            QCOMPARE(transport.logical.size(),digest?1:2);
+        }
     }
     void metadataCases_data() {
         QTest::addColumn<QString>("kind");QTest::addColumn<int>("state");QTest::addColumn<int>("code");

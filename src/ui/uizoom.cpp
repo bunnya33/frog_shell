@@ -1,5 +1,6 @@
 #include "../core/operationgate.h"
 #include "uizoom.h"
+#include "theme.h"
 #include <cmath>
 namespace rs {
 UiZoomStyle::UiZoomStyle():QProxyStyle(QStyleFactory::create("Fusion")) {}
@@ -8,6 +9,7 @@ int UiZoomStyle::styleHint(StyleHint hint,const QStyleOption *option,const QWidg
     return QProxyStyle::styleHint(hint,option,widget,data);
 }
 int UiZoomStyle::pixelMetric(PixelMetric metric,const QStyleOption *option,const QWidget *widget) const {
+    if((metric==PM_IndicatorWidth || metric==PM_IndicatorHeight) && qobject_cast<const QCheckBox *>(widget))return uiPx(18);
     // PanelTabs reserves its own shared edge; native tab-base overlap would
     // shorten and vertically centre its corner actions against another base.
     if(metric==PM_TabBarBaseHeight&&widget&&widget->property("panelTabs").toBool())return 0;
@@ -29,6 +31,38 @@ int UiZoomStyle::pixelMetric(PixelMetric metric,const QStyleOption *option,const
         return base<0?base:uiPx(base);
     default:return base;
     }
+}
+void UiZoomStyle::drawPrimitive(PrimitiveElement element,const QStyleOption *option,QPainter *painter,const QWidget *widget) const {
+    if(element!=PE_IndicatorCheckBox || !qobject_cast<const QCheckBox *>(widget)) {
+        QProxyStyle::drawPrimitive(element,option,painter,widget);return;
+    }
+    const bool enabled=option->state & State_Enabled;
+    const bool checked=option->state & (State_On | State_NoChange);
+    const bool hover=option->state & State_MouseOver;
+    const bool pressed=option->state & State_Sunken;
+    const bool focus=option->state & State_HasFocus;
+    const auto c=colors();
+    auto mix=[](QColor a,QColor b,qreal amount){return QColor::fromRgbF(a.redF()*(1-amount)+b.redF()*amount,a.greenF()*(1-amount)+b.greenF()*amount,a.blueF()*(1-amount)+b.blueF()*amount);};
+    QColor fill=checked?c.accent:c.side;
+    QColor border=checked?c.accent:c.muted;
+    if(enabled && hover)fill=mix(fill,checked?c.text:c.muted,pressed?.27:.13);
+    if(enabled && pressed && !hover)fill=mix(fill,c.text,.22);
+    if(!enabled){fill=mix(fill,c.background,.55);border=mix(border,c.background,.4);}
+    if(enabled && focus)border=checked?(lightTheme()?QColor("#003c86"):QColor("#f8f8f2")):c.accent;
+    const qreal penWidth=uiReal(focus && enabled?2:1.5);
+    QRectF rect=QRectF(option->rect).adjusted(penWidth/2,penWidth/2,-penWidth/2,-penWidth/2);
+    painter->save();painter->setRenderHint(QPainter::Antialiasing);
+    painter->setPen(QPen(border,penWidth));painter->setBrush(fill);
+    painter->drawRoundedRect(rect,uiReal(3),uiReal(3));
+    if(checked){
+        QColor ink=lightTheme()?QColor("#ffffff"):QColor("#282a36");
+        if(!enabled)ink=mix(ink,fill,.35);
+        painter->setPen(QPen(ink,uiReal(2),Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));
+        const QRectF r(option->rect);
+        if(option->state & State_NoChange)painter->drawLine(QPointF(r.left()+r.width()*.27,r.center().y()),QPointF(r.left()+r.width()*.73,r.center().y()));
+        else {QPainterPath tick;tick.moveTo(r.left()+r.width()*.23,r.top()+r.height()*.51);tick.lineTo(r.left()+r.width()*.43,r.top()+r.height()*.70);tick.lineTo(r.left()+r.width()*.77,r.top()+r.height()*.31);painter->drawPath(tick);}
+    }
+    painter->restore();
 }
 UiZoom::UiZoom(QObject *parent):QObject(parent) {
     bool ok=false;const int saved=QSettings().value("appearance/uiZoomLevel",0).toInt(&ok);

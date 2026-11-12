@@ -107,6 +107,7 @@ class AppearanceTests : public QObject {
         QCoreApplication::setApplicationName("RabbitShellAppearanceTests");
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, data.path());
+        QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, data.path());
         QApplication::setStyle("Fusion");
         // Only the CJK UI/fallback font is loaded from the OS in this harness.
         // Cascadia is always read from the executable's Qt resource.
@@ -167,6 +168,59 @@ class AppearanceTests : public QObject {
         QFETCH(bool,light);applyTheme(light);AppLock lock(data.path());MainWindow window(true,std::make_shared<FontMemorySecrets>());window.show();settle();
         bool captured=false;QTimer::singleShot(0,&window,[&]{auto dialog=qobject_cast<QDialog *>(QApplication::activeModalWidget());if(!dialog)return;auto list=dialog->findChild<QListWidget *>("settingsCategories");if(list){captured=true;for(int i=0;i<list->count();++i){list->setCurrentRow(i);settle();captured=dialog->grab().save(report+QString("/settings-%1-%2.png").arg(light?"light":"dark").arg(i))&&captured;}}dialog->accept();});
         window.settings();QVERIFY(captured);applyTheme(false);
+    }
+    void checkboxProductionDialogs(){
+        QSettings().setValue("update/automaticCheckEnabled",false);
+        auto reveal=[](QWidget *w){for(auto p=w->parentWidget();p;p=p->parentWidget())if(auto scroll=qobject_cast<QScrollArea *>(p)){scroll->ensureWidgetVisible(w);break;}};
+        for(bool light:{false,true}) {
+            applyTheme(light); const QString suffix=light?"light":"dark";
+            MainWindow window(true,std::make_shared<FontMemorySecrets>());window.show();settle();
+            bool profileCaptured=false;
+            QTimer::singleShot(0,&window,[&]{
+                auto dialog=qobject_cast<QDialog *>(QApplication::activeModalWidget());if(!dialog)return;
+                auto close=qScopeGuard([&]{dialog->reject();});
+                auto box=dialog->findChild<QCheckBox *>("profileRememberSecret");if(!box)return;
+                reveal(box);settle();
+                profileCaptured=box->isVisible() && dialog->grab().save(report+"/profile-password-"+suffix+".png");
+                for(auto combo:dialog->findChildren<StyledComboBox *>())if(combo->findData("key")>=0){
+                    combo->setCurrentIndex(combo->findData("key"));settle();
+                    profileCaptured=profileCaptured && box->text().contains("私钥") && dialog->grab().save(report+"/profile-key-"+suffix+".png");break;
+                }
+            });
+            window.editProfile();QVERIFY(profileCaptured);
+            for(const QString auth:{QString("password"),QString("key")}) {
+                Profile p;p.id="checkbox-fixture";p.name="示例";p.host="example.invalid";p.user="fixture";p.authentication=auth;
+                ConnectionRepository repository(nullptr,std::make_shared<FontMemorySecrets>());repository.profiles.append(p);
+                Workspace workspace(p,{},true,nullptr,&repository);workspace.show();settle();bool captured=false;
+                QTimer::singleShot(0,&workspace,[&]{auto dialog=qobject_cast<QDialog *>(QApplication::activeModalWidget());if(!dialog)return;
+                    auto close=qScopeGuard([&]{dialog->reject();});auto box=dialog->findChild<QCheckBox *>("loginRememberSecret");
+                    captured=box && box->isVisible() && box->isEnabled() && dialog->grab().save(report+"/login-"+auth+"-"+suffix+".png");
+                });
+                workspace.promptCredential(false,false,true);QVERIFY(captured);
+            }
+            Workspace workspace(Profile{}, {},true);workspace.show();settle();bool permissions=false;
+            QTimer::singleShot(0,&workspace,[&]{auto dialog=qobject_cast<QDialog *>(QApplication::activeModalWidget());if(!dialog)return;
+                auto close=qScopeGuard([&]{dialog->reject();});const auto boxes=dialog->findChildren<QCheckBox *>();
+                permissions=boxes.size()==9 && dialog->grab().save(report+"/permissions-"+suffix+".png");
+            });
+            workspace.properties({{"path","/synthetic/example.txt"},{"permissions",int(0644)},{"size",42},{"modified",0}});QVERIFY(permissions);
+            ServicesPanel service("示例",true);service.show();service.newService();settle();
+            auto form=service.findChild<QDialog *>("newServiceDialog");QVERIFY(form);
+            for(const char *name:{"serviceRestart","serviceEnable","serviceStart"})QVERIFY(form->findChild<QCheckBox *>(name));
+            reveal(form->findChild<QCheckBox *>("serviceStart"));settle();
+            QVERIFY(form->grab().save(report+"/service-checkboxes-"+suffix+".png"));form->reject();settle();
+            bool loggingCaptured=false, updateCaptured=false;
+            QTimer::singleShot(0,&window,[&]{auto dialog=qobject_cast<QDialog *>(QApplication::activeModalWidget());if(!dialog)return;
+                auto close=qScopeGuard([&]{dialog->reject();});auto categories=dialog->findChild<QListWidget *>("settingsCategories");
+                auto logging=dialog->findChild<QCheckBox *>("diagnosticLoggingEnabled");auto update=dialog->findChild<QCheckBox *>("updateAutomaticCheck");
+                if(!categories||!logging||!update)return;
+                for(int i=0;i<categories->count();++i){categories->setCurrentRow(i);settle();
+                    if(logging->isVisible()){reveal(logging);settle();loggingCaptured=dialog->grab().save(report+"/diagnostic-checkbox-"+suffix+".png");}
+                    if(update->isVisible()){reveal(update);settle();updateCaptured=dialog->grab().save(report+"/update-checkbox-"+suffix+".png");}
+                }
+            });
+            window.settings();QVERIFY(loggingCaptured);QVERIFY(updateCaptured);
+        }
     }
     void promptAndListeningEvidence(){
         for(bool light:{false,true})for(int level:{0,2}){

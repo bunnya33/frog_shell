@@ -69,6 +69,7 @@ struct UpdateController::Impl {
     quint64 generation=0;
     bool preparing=false,restarting=false,approved=false,migrating=false;
     bool recoveryRequired=false,available=false,oneClick=false;
+    bool startupDue=false,startupPending=true,automaticAttemptInProcess=false;
     QString availableVersion;
     qint64 received=0,total=0;
     Impl(UpdateController *q,const releaseupdate::Config &config,const selfupdate::PortableOrigin &origin,
@@ -78,7 +79,7 @@ struct UpdateController::Impl {
         if(settings.contains("update/githubOwner")||settings.contains("update/githubRepo")) {
             if(settings.value("update/githubOwner").toString().compare(source.owner,Qt::CaseInsensitive)!=0 ||
                settings.value("update/githubRepo").toString().compare(source.repository,Qt::CaseInsensitive)!=0) {
-                settings.remove("update/lastAutomaticAttemptUtc");settings.remove("update/lastNotifiedVersion");
+                settings.remove("update/lastAutomaticAttemptUtc");settings.remove("update/lastNotifiedVersion");settings.remove("update/rateLimitUntilUtc");
             }
             settings.remove("update/githubOwner");settings.remove("update/githubRepo");
         }
@@ -119,13 +120,14 @@ releaseupdate::Config UpdateController::runtimeConfig() {
 UpdateController::UpdateController(const releaseupdate::Config &runtime,const selfupdate::PortableOrigin &origin,
         const QString &base,QObject *parent,QNetworkAccessManager *transport):QObject(parent),d(std::make_unique<Impl>(this,runtime,origin,base,transport)) {
     refreshInstallStatus();
+    auto periodic=new QTimer(this);periodic->setTimerType(Qt::PreciseTimer);periodic->setInterval(30*60*1000);
     connect(d->client,&releaseupdate::Client::stateChanged,this,[this](S state,const QString &){
         QString text;
         switch(state) {
         case S::Idle:text="点击“检查更新”获取最新稳定版本。";break;
         case S::Unconfigured:text="尚未配置更新源，请在设置中填写 GitHub 仓库。";break;
         case S::Disabled:text="自动检查已关闭。";break;
-        case S::Throttled:text="今天已自动检查过；仍可手动检查。";break;
+        case S::Throttled:text="检查间隔尚未到，或更新服务要求稍后重试。";break;
         case S::Checking:text="正在检查更新…";break;
         case S::UpToDate:text="当前已是最新稳定版本。";break;
         case S::Available:text="发现新版本 "+d->client->release().version+"。";break;
@@ -138,8 +140,8 @@ UpdateController::UpdateController(const releaseupdate::Config &runtime,const se
         if(state==S::Failed||state==S::Cancelled)d->oneClick=false;
         d->changed(text);
     });
-    connect(d->client,&releaseupdate::Client::automaticAttemptStarted,this,[](const QDateTime &utc){QSettings().setValue("update/lastAutomaticAttemptUtc",utc);});
-    connect(d->client,&releaseupdate::Client::errorOccurred,this,[this](const auto &error){d->changed(chineseError(error));});
+    connect(d->client,&releaseupdate::Client::automaticAttemptStarted,this,[this,periodic](const QDateTime &utc){d->automaticAttemptInProcess=true;QSettings().setValue("update/lastAutomaticAttemptUtc",utc);periodic->start(30*60*1000);});
+    connect(d->client,&releaseupdate::Client::errorOccurred,this,[this](const auto &error){if(error.code==releaseupdate::ErrorCode::RateLimited&&error.retryAfterUtc.isValid())QSettings().setValue("update/rateLimitUntilUtc",error.retryAfterUtc);d->changed(chineseError(error));});
     connect(d->client,&releaseupdate::Client::checkFinished,this,[this](const releaseupdate::CheckResult &result){
         if(result.state==S::Available||result.state==S::ManualDownload){d->available=true;d->availableVersion=result.release.version;}
         else if(result.state==S::UpToDate){d->available=false;d->availableVersion.clear();}
@@ -150,11 +152,13 @@ UpdateController::UpdateController(const releaseupdate::Config &runtime,const se
             QSettings().setValue("update/lastNotifiedVersion",result.release.version);emit updateAvailable(result.release.version);
         }
         if(proceed)download();
+        if(d->startupDue&&d->startupPending)QTimer::singleShot(0,this,&UpdateController::tryStartupCheck);
     });
     connect(d->client,&releaseupdate::Client::downloadProgress,this,[this](qint64 received,qint64 total){d->received=received;d->total=total;d->changed();});
     connect(d->client,&releaseupdate::Client::downloadVerified,this,[this](const auto &download){d->releaseDownload();d->verified=download;d->downloadLease=std::make_shared<DownloadLease>();d->downloadLease->download=download;const bool proceed=d->oneClick;d->oneClick=false;d->changed("下载已完成，SHA-256 校验通过。");if(proceed&&!OperationGate::locked())requestRestart();});
-    if(auto lock=AppLock::instance())connect(lock,&AppLock::lockedChanged,this,[this](bool locked){if(locked)cancel();});
-    auto daily=new QTimer(this);daily->setInterval(60*60*1000);connect(daily,&QTimer::timeout,this,[this]{check(true);});daily->start();
+    if(auto lock=AppLock::instance())connect(lock,&AppLock::lockedChanged,this,[this](bool locked){if(locked)cancel();else tryStartupCheck();});
+    QTimer::singleShot(1500,this,[this]{d->startupDue=true;tryStartupCheck();});
+    connect(periodic,&QTimer::timeout,this,[this]{if(d->startupPending&&d->startupDue)tryStartupCheck();else check(true);});periodic->start();
 }
 UpdateController::~UpdateController(){if(d->canceled)d->canceled->store(true);if(d->about)delete d->about;d->client->cancel();d->releaseDownload();}
 releaseupdate::Config UpdateController::configuration()const{return d->client->config();}
@@ -204,13 +208,29 @@ void UpdateController::requestUpdate(){
     d->changed();
 }
 void UpdateController::check(bool automatic) {
-    if(OperationGate::locked()||restartPending()||d->client->busy())return;
-    if(automatic&&(ready()||state()==S::Available||state()==S::ManualDownload||!QSettings().value("update/automaticCheckEnabled",true).toBool()))return;
+    checkScheduled(automatic?releaseupdate::CheckMode::Automatic:releaseupdate::CheckMode::Manual);
+}
+void UpdateController::tryStartupCheck() {
+    if(!d->startupDue||!d->startupPending||OperationGate::locked())return;
+    if(!QSettings().value("update/automaticCheckEnabled",true).toBool()){d->startupPending=false;return;}
+    if(d->automaticAttemptInProcess){d->startupPending=false;return;}
+    if(d->migrating||restartPending()||d->client->busy()||d->oneClick||ready())return;
+    d->startupPending=false;
+    checkScheduled(releaseupdate::CheckMode::Startup);
+}
+void UpdateController::checkScheduled(releaseupdate::CheckMode mode) {
+    const bool automatic=mode!=releaseupdate::CheckMode::Manual;
+    if(OperationGate::locked()||d->migrating||restartPending()||d->client->busy()||(automatic&&(d->oneClick||ready())))return;
+    if(automatic&&!QSettings().value("update/automaticCheckEnabled",true).toBool())return;
     d->releaseDownload();d->received=d->total=0;
     QSettings settings;releaseupdate::Schedule schedule;
     schedule.automaticEnabled=settings.value("update/automaticCheckEnabled",true).toBool();
     schedule.lastAutomaticAttemptUtc=settings.value("update/lastAutomaticAttemptUtc").toDateTime();schedule.lastNotifiedVersion=settings.value("update/lastNotifiedVersion").toString();
-    d->client->check(automatic?releaseupdate::CheckMode::Automatic:releaseupdate::CheckMode::Manual,schedule);
+    schedule.rateLimitUntilUtc=settings.value("update/rateLimitUntilUtc").toDateTime();
+    // Preserve a usable pending release when the periodic tick is too early.
+    if(mode==releaseupdate::CheckMode::Automatic&&schedule.lastAutomaticAttemptUtc.isValid()&&
+       schedule.lastAutomaticAttemptUtc.toUTC().secsTo(QDateTime::currentDateTimeUtc())<1800)return;
+    d->client->check(mode,schedule);
 }
 void UpdateController::download() {
     if(OperationGate::locked()||restartPending()||d->client->busy())return;
@@ -229,7 +249,7 @@ void UpdateController::cancelExitIntent() {
     if(had)d->changed(result.ok()?"已取消重启，尚未安装更新。":"已取消重启；部分暂存文件未能清理。");else d->changed();
 }
 void UpdateController::cancel(){d->oneClick=false;cancelExitIntent();d->client->cancel();d->releaseDownload();d->changed("已取消更新任务。");}
-void UpdateController::setMigrationPending(bool pending){d->migrating=pending;if(pending)cancelExitIntent();d->changed();}
+void UpdateController::setMigrationPending(bool pending){d->migrating=pending;if(pending)cancelExitIntent();else tryStartupCheck();d->changed();}
 void UpdateController::confirmExit(){d->approved=d->restarting&&d->install.valid();}
 selfupdate::PreparedInstall UpdateController::takePreparedInstall(){if(!d->approved)return {};d->approved=d->restarting=false;return std::move(d->install);}
 void UpdateController::requestRestart() {
@@ -264,8 +284,8 @@ QWidget *UpdateController::createSettingsPage(QWidget *parent) {
     auto title=plainLabel("更新");title->setProperty("heading",true);layout->addWidget(title);
     auto card=new QWidget;setFrameRole(card,"card");auto form=new QVBoxLayout(card);uiMargins(form,16,16,16,16);uiSpacing(form,10);layout->addWidget(card);
     form->addWidget(plainLabel("更新源：github.com/bunnya33/frog_shell"));
-    auto automatic=new QCheckBox("每天自动检查更新");automatic->setObjectName("updateAutomaticCheck");automatic->setChecked(QSettings().value("update/automaticCheckEnabled",true).toBool());form->addWidget(automatic);
-    auto note=plainLabel("默认开启，每 24 小时最多自动检查一次；发现更新后由你选择是否安装。");note->setProperty("muted",true);form->addWidget(note);
+    auto automatic=new QCheckBox("启动时及每 30 分钟自动检查更新");automatic->setObjectName("updateAutomaticCheck");automatic->setChecked(QSettings().value("update/automaticCheckEnabled",true).toBool());form->addWidget(automatic);
+    auto note=plainLabel("默认开启；发现更新后由你选择是否安装。服务限流或更新任务进行时会延后检查。");note->setProperty("muted",true);form->addWidget(note);
     auto feedback=plainLabel({});feedback->setObjectName("updateSettingsStatus");form->addWidget(feedback);
     auto save=button("保存更新设置");save->setObjectName("saveUpdateSettings");form->addWidget(save,0,Qt::AlignLeft);
     connect(save,&QPushButton::clicked,page,[=,this]{QString error;if(setAutomaticCheckEnabled(automatic->isChecked(),&error))feedback->setText("更新设置已保存。");else feedback->setText(error);});

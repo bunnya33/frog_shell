@@ -142,6 +142,7 @@ struct Client::Impl {
     Phase phase = Phase::None;
     Schedule schedule;
     CheckMode mode = CheckMode::Manual;
+    bool startupConsumed = false;
     QDateTime clock, rateUntil, automaticAttempt;
     QUrl logicalUrl, metadataUrl, checksumUrl;
     qint64 checksumSize = 0, written = 0;
@@ -416,17 +417,26 @@ void Client::check(CheckMode mode,const Schedule &schedule) {
     if(d->config.owner.isEmpty()||d->config.repository.isEmpty()){d->finishCheck(State::Unconfigured);return;}
     QString reason;
     if(!validConfig(d->config,&reason)||!d->limitsValid()){d->fail(error(ErrorCode::InvalidConfiguration,reason.isEmpty()?"Invalid update resource limits":reason));return;}
-    if(mode==CheckMode::Automatic&&!schedule.automaticEnabled){d->finishCheck(State::Disabled);return;}
+    const bool startup=mode==CheckMode::Startup;
+    const bool automatic=mode!=CheckMode::Manual;
+    const bool repeatedStartup=startup&&d->startupConsumed;
+    if(startup)d->startupConsumed=true;
+    if(automatic&&!schedule.automaticEnabled){d->finishCheck(State::Disabled);return;}
     auto previous=schedule.lastAutomaticAttemptUtc.toUTC();
     if(d->automaticAttempt.isValid()&&(!previous.isValid()||previous<d->automaticAttempt))previous=d->automaticAttempt;
-    if(mode==CheckMode::Automatic&&previous.isValid()&&previous.secsTo(d->clock)<86400){d->finishCheck(State::Throttled);return;}
-    if(d->rateUntil.isValid()&&d->clock<d->rateUntil){auto e=error(ErrorCode::RateLimited,"GitHub rate limit cooldown active");e.retryAfterUtc=d->rateUntil;d->finishCheck(State::Throttled,e);return;}
+    // Startup may ignore a previous process's timestamp, never an attempt
+    // already made by this client, and can be requested only once.
+    if(startup)previous=d->automaticAttempt;
+    if(automatic&&(repeatedStartup||(previous.isValid()&&previous.secsTo(d->clock)<1800))){d->finishCheck(State::Throttled);return;}
+    auto rateUntil=d->rateUntil;
+    if(schedule.rateLimitUntilUtc.isValid()&&(!rateUntil.isValid()||schedule.rateLimitUntilUtc.toUTC()>rateUntil))rateUntil=schedule.rateLimitUntilUtc.toUTC();
+    if(rateUntil.isValid()&&d->clock<rateUntil){auto e=error(ErrorCode::RateLimited,"GitHub rate limit cooldown active");e.retryAfterUtc=rateUntil;d->finishCheck(State::Throttled,e);return;}
     d->phase=Impl::Phase::Metadata;d->redirectCount=0;
     d->metadataUrl=QUrl("https://api.github.com/repos/"+d->config.owner+"/"+d->config.repository+"/releases/latest");
     const auto op=d->operation;
     if(!d->transition(State::Checking,"Checking GitHub Release"))return;
     if(d->operation!=op)return;
-    if(mode==CheckMode::Automatic){d->automaticAttempt=d->clock;QPointer<Client> guard(this);emit automaticAttemptStarted(d->clock);if(!guard||d->operation!=op)return;}
+    if(automatic){d->automaticAttempt=d->clock;QPointer<Client> guard(this);emit automaticAttemptStarted(d->clock);if(!guard||d->operation!=op)return;}
     d->deadline.start(d->limits.requestTimeoutMs);d->startRequest(d->metadataUrl);
 }
 void Client::download(const QString &directory) {

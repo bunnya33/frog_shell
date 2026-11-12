@@ -83,6 +83,7 @@ class DocumentSearchController final : public QObject {
     QList<QPointer<Workspace>> workspaces;
     QPointer<Workspace> host;
     QPointer<Editor> lastEditor;
+    QPointer<CodeEdit> highlightedEditor;
     SearchSource captured, resultOrigin;
     QByteArray resultDigest;
     QVector<QTextCursor> anchors;
@@ -99,5 +100,6 @@ class DocumentSearchController final : public QObject {
     void parkResults();
     void navigate(Editor *editor, int row, bool reopened);
     void resumeActivation();
+    void publishHighlights(Editor *editor, const SearchOutcome &result);
 };
 }

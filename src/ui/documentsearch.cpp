@@ -171,7 +171,12 @@ DocumentSearchController::DocumentSearchController(QWidget *parent):QObject(pare
     connect(qApp,&QApplication::focusChanged,this,[this](QWidget *,QWidget *focus){if(auto editor=editorFromFocus(focus))lastEditor=editor;});
     if(auto lock=AppLock::instance())connect(lock,&AppLock::lockedChanged,this,[this](bool value){if(value){cancelSearch();pendingActivation=-1;}});
 }
-DocumentSearchController::~DocumentSearchController(){cancelSearch();}
+DocumentSearchController::~DocumentSearchController(){cancelSearch();if(highlightedEditor)highlightedEditor->clearAdvancedSearch();}
+void DocumentSearchController::publishHighlights(Editor *editor,const SearchOutcome &result){
+    if(highlightedEditor)highlightedEditor->clearAdvancedSearch();
+    highlightedEditor=editor?editor->code:nullptr;
+    if(highlightedEditor)highlightedEditor->setAdvancedSearch(result);
+}
 Workspace *DocumentSearchController::workspaceFor(Editor *editor) const {
     if(!editor)return nullptr;
     for(auto workspace:workspaces)if(workspace&&!workspace->shuttingDown&&workspace->editors.value(editor->path)==editor)return workspace;
@@ -228,6 +233,7 @@ void DocumentSearchController::executeSearch() {
         *completed=true;process=nullptr;worker->deleteLater();
         if(!origin.editor||workspaceFor(origin.editor)!=sourceWorkspace(origin)||origin.editor->path!=origin.path||origin.editor->code->document()!=origin.document||origin.document->revision()!=revision){dialog->setFeedback("来源内容已变化，请重新查找。",true);emit searchFinished(false);return;}
         if(!result.error.isEmpty()){dialog->setFeedback(result.error,true);emit searchFinished(false);return;}
+        publishHighlights(origin.editor,result);
         resultOrigin=origin;resultDigest=hash;anchors.clear();pendingActivation=-1;
         resultWindow->setWindowTitle("搜索结果 — "+origin.server);
         for(const auto &line:result.lines){QTextCursor anchor(origin.document);const auto span=line.spans.first();anchor.setPosition(line.offset+span.start);anchor.setPosition(line.offset+span.start+span.length,QTextCursor::KeepAnchor);anchors.append(anchor);}
@@ -289,9 +295,13 @@ void DocumentSearchController::navigate(Editor *editor,int row,bool reopened){
     if(block.text()!=hit.text||cursor.selectedText()!=hit.text.mid(hit.spans.first().start,hit.spans.first().length)){
         resultPanel->setFeedback("搜索结果已过期：命中行已修改，请重新搜索。");return;
     }
+    if(reopened){
+        publishHighlights(editor,resultPanel->outcome());resultOrigin.editor=editor;resultOrigin.document=editor->code->document();anchors.clear();
+        for(const auto &line:resultPanel->outcome().lines){QTextCursor anchor(resultOrigin.document);const auto span=line.spans.first();anchor.setPosition(line.offset+span.start);anchor.setPosition(line.offset+span.start+span.length,QTextCursor::KeepAnchor);anchors.append(anchor);}
+    }
     emit workspaceActivationRequested(workspace);workspace->openFile(editor->path);
     auto window=editor->window();window->show();if(window->isMinimized())window->showNormal();window->raise();window->activateWindow();
-    editor->code->setTextCursor(cursor);editor->code->ensureCursorVisible();editor->code->setFocus();
+    editor->code->setAdvancedSearchCurrent(row,cursor);editor->code->setTextCursor(cursor);editor->code->centerCursor();editor->code->setFocus();
     resultPanel->setFeedback({});emit resultActivated(editor,block.blockNumber()+1,cursor.selectionStart()-block.position()+1);
 }
 bool DocumentSearchController::eventFilter(QObject *object,QEvent *event){if(object==resultWindow&&event->type()==QEvent::Close){if(!OperationGate::locked())parkResults();static_cast<QCloseEvent *>(event)->ignore();return true;}return QObject::eventFilter(object,event);}

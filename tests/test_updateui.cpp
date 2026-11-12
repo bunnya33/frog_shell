@@ -39,7 +39,7 @@ class UpdateSecrets final:public SecretBackend {
 };
 class UpdateHttp final:public QObject {
   public:
-    QTcpServer server;QByteArray package=QByteArray(512*1024,'P');int requests=0;bool slow=false,corrupt=false,noUpdate=false;
+    QTcpServer server;QByteArray package=QByteArray(512*1024,'P');int requests=0,status=200;bool slow=false,corrupt=false,noUpdate=false;
     UpdateHttp(){
         if(!server.listen(QHostAddress::LocalHost,0))qFatal("loopback fixture failed");
         connect(&server,&QTcpServer::newConnection,this,[this]{while(server.hasPendingConnections()){
@@ -48,6 +48,7 @@ class UpdateHttp final:public QObject {
             connect(socket,&QTcpSocket::readyRead,this,[this,socket,request]{
                 *request+=socket->readAll();if(socket->property("handled").toBool()||!request->contains("\r\n\r\n"))return;
                 socket->setProperty("handled",true);++requests;
+                if(status!=200){socket->write("HTTP/1.1 "+QByteArray::number(status)+" Limited\r\nRetry-After: 120\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");socket->disconnectFromHost();return;}
                 const auto path=request->split(' ').value(1);QByteArray body;bool metadata=path.endsWith("/latest");
                 if(metadata){
                     QJsonObject asset{{"name","FrogShell-0.1.43-portable.exe"},{"size",package.size()},
@@ -81,9 +82,10 @@ class MenuTests final:public QObject {
     QDialog *about(UpdateController &controller,QWidget &owner){controller.showAbout(&owner);QCoreApplication::processEvents();return owner.findChild<QDialog *>("aboutFrogShellDialog");}
   private slots:
     void initTestCase(){QVERIFY(root.isValid());QStandardPaths::setTestModeEnabled(true);QCoreApplication::setOrganizationName("FrogShellUpdateTests");QCoreApplication::setApplicationName("Isolated");QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,root.path());QSettings::setPath(QSettings::IniFormat,QSettings::SystemScope,root.path());QApplication::setStyle("Fusion");QApplication::setWindowIcon(applicationIcon());qApp->setQuitOnLastWindowClosed(false);if(QFileInfo::exists("C:/Windows/Fonts/msyh.ttc"))QFontDatabase::addApplicationFont("C:/Windows/Fonts/msyh.ttc");QApplication::setFont(QFont("Microsoft YaHei UI"));report=qEnvironmentVariable("RABBITSHELL_TEST_REPORT_DIR",root.path());QVERIFY(QDir().mkpath(report));}
-    void init(){data=std::make_unique<QTemporaryDir>(root.filePath("case-XXXXXX"));qputenv("RABBITSHELL_DATA_DIR",data->path().toUtf8());QSettings().clear();OperationGate::setLocked(false);applyTheme(false);}
+    void init(){data=std::make_unique<QTemporaryDir>(root.filePath("case-XXXXXX"));qputenv("RABBITSHELL_DATA_DIR",data->path().toUtf8());QSettings().clear();QSettings().setValue("update/automaticCheckEnabled",false);OperationGate::setLocked(false);applyTheme(false);}
     void cleanup(){OperationGate::setLocked(false);QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);}
     void fixedSourceAndLegacySettings(){
+        QSettings().remove("update/automaticCheckEnabled");
         QSettings().setValue("update/githubOwner","attacker");QSettings().setValue("update/githubRepo","other");
         QSettings().setValue("update/lastAutomaticAttemptUtc",QDateTime::currentDateTimeUtc());
         auto config=runtime();config.owner="attacker";config.repository="other";
@@ -97,22 +99,75 @@ class MenuTests final:public QObject {
         QCOMPARE(network.logicalUrls.first(),QUrl("https://api.github.com/repos/bunnya33/frog_shell/releases/latest"));
         QVERIFY(controller.setAutomaticCheckEnabled(false));QVERIFY(!QSettings().value("update/automaticCheckEnabled").toBool());
     }
-    void hourlyChecksRemainBackgroundAndThrottled(){
+    void startupAndHalfHourChecks() {
+        QSettings().setValue("update/automaticCheckEnabled",true);
+        QSettings().setValue("update/lastAutomaticAttemptUtc",QDateTime::currentDateTimeUtc());
         UpdateHttp fixture;UpdateTransport network(fixture);UpdateController controller(runtime(),{},data->filePath("updates"),nullptr,&network);
-        QTimer *hourly=nullptr;for(auto timer:controller.findChildren<QTimer *>())if(timer->interval()==60*60*1000)hourly=timer;
-        QVERIFY(hourly);QVERIFY(hourly->isActive());QVERIFY(QMetaObject::invokeMethod(hourly,"timeout"));
-        QTRY_COMPARE_WITH_TIMEOUT(controller.state(),releaseupdate::State::Available,5000);QCOMPARE(network.logicalRequests,1);
-        QVERIFY(QSettings().value("update/lastAutomaticAttemptUtc").toDateTime().isValid());
-        QVERIFY(QMetaObject::invokeMethod(hourly,"timeout"));QCOMPARE(controller.state(),releaseupdate::State::Available);QCOMPARE(network.logicalRequests,1);
-        // A pending available update remains visible. A fresh controller reads
-        // the persisted schedule and delegates the next attempt to core's gate.
-        UpdateController fresh(runtime(),{},data->filePath("next-start"),nullptr,&network);
-        QTimer *next=nullptr;for(auto timer:fresh.findChildren<QTimer *>())if(timer->interval()==60*60*1000)next=timer;
-        QVERIFY(next);QVERIFY(QMetaObject::invokeMethod(next,"timeout"));QCOMPARE(fresh.state(),releaseupdate::State::Throttled);QCOMPARE(network.logicalRequests,1);
-        OperationGate::setLocked(true);QVERIFY(QMetaObject::invokeMethod(next,"timeout"));QCOMPARE(network.logicalRequests,1);
-        OperationGate::setLocked(false);QVERIFY(fresh.setAutomaticCheckEnabled(false));
-        UpdateController disabled(runtime(),{},data->filePath("disabled"),nullptr,&network);disabled.check(true);QCOMPARE(network.logicalRequests,1);
+        QTimer *periodic=nullptr;for(auto timer:controller.findChildren<QTimer *>())if(timer->interval()==30*60*1000)periodic=timer;
+        QVERIFY(periodic);QVERIFY(periodic->isActive());
+        QTRY_COMPARE_WITH_TIMEOUT(controller.state(),releaseupdate::State::Available,5000);
+        QCOMPARE(network.logicalRequests,1);QVERIFY(controller.hasUpdate());
+        QVERIFY(QMetaObject::invokeMethod(periodic,"timeout"));QCOMPARE(network.logicalRequests,1);QCOMPARE(controller.state(),releaseupdate::State::Available);
+        QSettings().setValue("update/lastAutomaticAttemptUtc",QDateTime::currentDateTimeUtc().addSecs(-1801));
+        UpdateController fresh(runtime(),{},data->filePath("next"),nullptr,&network);
+        QTimer *next=nullptr;for(auto timer:fresh.findChildren<QTimer *>())if(timer->interval()==30*60*1000)next=timer;
+        QVERIFY(next);QVERIFY(QMetaObject::invokeMethod(next,"timeout"));
+        QTRY_COMPARE_WITH_TIMEOUT(fresh.state(),releaseupdate::State::Available,5000);QCOMPARE(network.logicalRequests,2);
+        QTest::qWait(1700);QCOMPARE(network.logicalRequests,2);
         QVERIFY(!QApplication::activeModalWidget());
+    }
+    void disabledStartupAndTimer() {
+        UpdateHttp fixture;UpdateTransport network(fixture);UpdateController controller(runtime(),{},data->filePath("disabled"),nullptr,&network);
+        QTimer *periodic=nullptr;for(auto timer:controller.findChildren<QTimer *>())if(timer->interval()==30*60*1000)periodic=timer;
+        QVERIFY(periodic);QTest::qWait(1700);QVERIFY(QMetaObject::invokeMethod(periodic,"timeout"));QCOMPARE(network.logicalRequests,0);
+        QVERIFY(!QSettings().value("update/automaticCheckEnabled").toBool());
+    }
+    void automaticAttemptResetsPeriodicTimer() {
+        QSettings().setValue("update/automaticCheckEnabled",true);
+        UpdateHttp fixture;UpdateTransport network(fixture);UpdateController controller(runtime(),{},data->filePath("reset-timer"),nullptr,&network);
+        QTimer *periodic=nullptr;for(auto timer:controller.findChildren<QTimer *>())if(timer->interval()==30*60*1000)periodic=timer;
+        QVERIFY(periodic);QCOMPARE(periodic->timerType(),Qt::PreciseTimer);
+        // Simulate a tick due soon, then start a real automatic fixture request.
+        periodic->start(10000);controller.check(true);
+        QCOMPARE(network.logicalRequests,1);QCOMPARE(periodic->interval(),30*60*1000);
+        QVERIFY(periodic->remainingTime()>30*60*1000-1000);
+        QTRY_COMPARE_WITH_TIMEOUT(controller.state(),releaseupdate::State::Available,5000);
+    }
+    void lockedStartupIsDeferredOnce() {
+        QSettings().setValue("update/automaticCheckEnabled",true);AppLock lock(data->path());
+        QSignalSpy enabled(&lock.security(),&SecurityStore::completed);lock.security().request(SecurityStore::Enable,{},"fixture-pass");
+        QTRY_VERIFY_WITH_TIMEOUT(!enabled.isEmpty(),10000);QVERIFY(enabled.last()[1].toBool());lock.lock();QVERIFY(OperationGate::locked());
+        UpdateHttp fixture;UpdateTransport network(fixture);UpdateController controller(runtime(),{},data->filePath("locked"),nullptr,&network);
+        QTest::qWait(1700);QCOMPARE(network.logicalRequests,0);
+        lock.unlock("fixture-pass");QTRY_VERIFY_WITH_TIMEOUT(!OperationGate::locked(),10000);
+        QTRY_COMPARE_WITH_TIMEOUT(controller.state(),releaseupdate::State::Available,5000);QCOMPARE(network.logicalRequests,1);
+        lock.lock();lock.unlock("fixture-pass");QTRY_VERIFY_WITH_TIMEOUT(!OperationGate::locked(),10000);
+        QTest::qWait(100);QCOMPARE(network.logicalRequests,1);
+    }
+    void startupRespectsBusyMigrationAndCooldown() {
+        QSettings().setValue("update/automaticCheckEnabled",true);
+        QSettings().setValue("update/rateLimitUntilUtc",QDateTime::currentDateTimeUtc().addSecs(120));
+        UpdateHttp fixture;UpdateTransport network(fixture);UpdateController controller(runtime(),{},data->filePath("cooldown"),nullptr,&network);
+        QTRY_COMPARE_WITH_TIMEOUT(controller.state(),releaseupdate::State::Throttled,5000);QCOMPARE(network.logicalRequests,0);
+        controller.check();QCOMPARE(network.logicalRequests,0);
+        QSettings().remove("update/rateLimitUntilUtc");
+        UpdateController migrating(runtime(),{},data->filePath("migrating"),nullptr,&network);migrating.setMigrationPending(true);
+        QTest::qWait(1700);migrating.check(true);QCOMPARE(network.logicalRequests,0);
+        migrating.setMigrationPending(false);QTRY_COMPARE_WITH_TIMEOUT(migrating.state(),releaseupdate::State::Available,5000);QCOMPARE(network.logicalRequests,1);
+        fixture.slow=true;migrating.download();QTRY_COMPARE_WITH_TIMEOUT(migrating.state(),releaseupdate::State::Downloading,3000);
+        migrating.check(true);QCOMPARE(network.logicalRequests,2);
+        QTRY_VERIFY_WITH_TIMEOUT(migrating.ready(),10000);migrating.check(true);QVERIFY(migrating.ready());QCOMPARE(network.logicalRequests,2);
+    }
+    void rateLimitSurvivesControllerRestart() {
+        QSettings().setValue("update/automaticCheckEnabled",true);
+        UpdateHttp fixture;fixture.status=429;UpdateTransport network(fixture);
+        {
+            UpdateController first(runtime(),{},data->filePath("first"),nullptr,&network);
+            QTRY_COMPARE_WITH_TIMEOUT(first.state(),releaseupdate::State::Failed,5000);QCOMPARE(network.logicalRequests,1);
+            QVERIFY(QSettings().value("update/rateLimitUntilUtc").toDateTime()>QDateTime::currentDateTimeUtc());
+        }
+        fixture.status=200;UpdateController restarted(runtime(),{},data->filePath("restarted"),nullptr,&network);
+        QTRY_COMPARE_WITH_TIMEOUT(restarted.state(),releaseupdate::State::Throttled,5000);QCOMPARE(network.logicalRequests,1);
     }
     void trayUpdateIconAndManualFallback(){
         for(bool light:{false,true}){

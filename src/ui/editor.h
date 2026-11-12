@@ -1,9 +1,12 @@
 #pragma once
 #include "../core/profile.h"
 #include <QtWidgets>
+#include <QTextBlock>
 #include "contentfont.h"
 #include "../core/syntaxdiagnostic.h"
+#include "../core/documentsearch.h"
 #include "theme.h"
+class EditorHighlightTests;
 namespace rs {
 class CodeDocumentLayout;
 class CodeEdit : public QPlainTextEdit {
@@ -14,6 +17,9 @@ class CodeEdit : public QPlainTextEdit {
     void refreshTheme();
     void paintLineNumbers(QPaintEvent *event);
     void setSyntaxPath(const QString &path);
+    void setAdvancedSearch(const SearchOutcome &result);
+    void clearAdvancedSearch();
+    void setAdvancedSearchCurrent(int row, const QTextCursor &cursor);
   signals:
     void syntaxStatusChanged(const QString &status);
 
@@ -28,6 +34,7 @@ class CodeEdit : public QPlainTextEdit {
   private:
     friend class AppearanceTests;
     friend class SyntaxDiagnosticTests;
+    friend class ::EditorHighlightTests;
     SyntaxFormat syntaxFormat = SyntaxFormat::None;
     SyntaxDiagnostic syntaxResult;
     quint64 syntaxRevision = 0;
@@ -51,6 +58,14 @@ class CodeEdit : public QPlainTextEdit {
     int currentMatch = -1;
     bool searchSelection = false;
     bool locatingMatch = false;
+    bool searchSelectionStyle = false;
+    QTextBlock outlinedBlock;
+    quint64 highlightRebuildCount = 0;
+    struct AdvancedRange { QTextCursor cursor; QString text; int start = 0, end = 0, row = -1; bool current = false; };
+    QVector<AdvancedRange> advancedRanges;
+    QTextCursor advancedCurrent;
+    int advancedCurrentRow = -1;
+    void adjustAdvancedSearch(int position, int removed, int added);
     QSyntaxHighlighter *highlighter = nullptr;
     CodeDocumentLayout *lineLayout = nullptr;
     QWidget *lineNumbers = nullptr;
@@ -62,6 +77,9 @@ class CodeEdit : public QPlainTextEdit {
     void updateMatches();
     void paintMatches();
     void updateHighlights();
+    void appendSearchLineHighlights(QList<QTextEdit::ExtraSelection> &selections, int position);
+    void updateSearchSelectionStyle();
+    void updateCursorOutline();
     void closeFind();
     QString replacementFor(const Match &match) const;
     void replaceMatches(bool all);

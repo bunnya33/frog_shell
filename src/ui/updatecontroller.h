@@ -50,6 +50,8 @@ class UpdateController final : public QObject {
     void settingsRequested();
     void manualUpdateRequested();
   private:
+    void checkScheduled(releaseupdate::CheckMode mode);
+    void tryStartupCheck();
     struct Impl;
     std::unique_ptr<Impl> d;
 };

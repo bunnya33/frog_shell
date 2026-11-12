@@ -1,7 +1,7 @@
 ﻿param(
     [string]$QtRoot = "$PSScriptRoot/../.tools/Qt/6.8.3/msvc2022_64",
     [string]$OpenSSLRoot = "$PSScriptRoot/../.tools/Qt/Tools/OpenSSLv3/Win_x64",
-    [string]$Version = '0.1.44',
+    [string]$Version = '0.1.45',
     [string]$Destination = ''
 )
 $ErrorActionPreference = 'Stop'
@@ -110,3 +110,4 @@ Copy-Item -LiteralPath "$projectRoot/docs/FrogShell-0.1.40验证记录.md","$pro
 Copy-Item -LiteralPath "$projectRoot/docs/FrogShell-0.1.41验证记录.md","$projectRoot/docs/0.1.41-implementation.zh-CN.md","$projectRoot/docs/0.1.41-ports-implementation.zh-CN.md","$projectRoot/docs/0.1.41-clock-integration.zh-CN.md","$projectRoot/docs/0.1.41-download-diagnostics.zh-CN.md","$projectRoot/docs/worker-syntax-0.1.41.zh-CN.md" -Destination "$destination/docs"
 Copy-Item -LiteralPath "$projectRoot/docs/FrogShell-0.1.42验证记录.md","$projectRoot/docs/FrogShell-0.1.43验证记录.md","$projectRoot/docs/0.1.42-about-update.zh-CN.md" -Destination "$destination/docs"
 Copy-Item -LiteralPath "$projectRoot/docs/0.1.44-clock.zh-CN.md","$projectRoot/docs/0.1.44-update.zh-CN.md","$projectRoot/docs/0.1.44-layout.zh-CN.md","$projectRoot/docs/FrogShell-0.1.44验证记录.md" -Destination "$destination/docs"
+Copy-Item -LiteralPath "$projectRoot/docs/FrogShell-0.1.45验证记录.md","$projectRoot/docs/0.1.45-update.zh-CN.md","$projectRoot/docs/0.1.45-installer.zh-CN.md" -Destination "$destination/docs"

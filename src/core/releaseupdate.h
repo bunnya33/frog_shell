@@ -30,8 +30,9 @@ struct Schedule {
     QDateTime lastAutomaticAttemptUtc;
     QString lastNotifiedVersion;
     QDateTime nowUtc; // invalid => currentDateTimeUtc(); deterministic fixture seam
+    QDateTime rateLimitUntilUtc; // persisted service cooldown, if any
 };
-enum class CheckMode { Manual, Automatic };
+enum class CheckMode { Manual, Automatic, Startup };
 enum class State {
     Idle, Unconfigured, Disabled, Throttled, Checking, UpToDate,
     Available, ManualDownload, Downloading, Ready, Cancelled, Failed

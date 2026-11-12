@@ -119,7 +119,10 @@ class EditorHighlightTests : public QObject {
         QVERIFY(edit.textCursor().hasSelection());
         QCOMPARE(edit.textCursor().selectedText(), QString("needle"));
         const QImage search = image(edit);
+        save(search, light ? "light-search" : "dark-search");
         QVERIFY(rowBackground(edit, search) != background);
+        const QTextCursor previous(edit.textCursor().block().previous());
+        QCOMPARE(pixel(search,QPoint(edit.viewport()->width()-12,edit.cursorRect(previous).center().y())),background);
         QCOMPARE(edgePixels(edit, search, border), 0);
         // All matches are drawn, with a distinct current match and a line tint.
         const auto selections = edit.extraSelections();
@@ -127,7 +130,6 @@ class EditorHighlightTests : public QObject {
         QVERIFY(selections[1].format.background().color() != selections[2].format.background().color());
         QVERIFY(colorPixels(search, selections[1].format.background().color()) > 0);
         QVERIFY(colorPixels(search, selections[2].format.background().color()) > 0);
-        save(search, light ? "light-search" : "dark-search");
         edit.setFocus();
         QTRY_VERIFY(edit.hasFocus());
         const QImage focusedSearch = image(edit);
@@ -226,6 +228,63 @@ class EditorHighlightTests : public QObject {
         QVERIFY(second->textCursor().hasSelection());
         QCOMPARE(edgePixels(*second, image(*second), border), 0);
         QCOMPARE(rowBackground(*second, image(*second)), colors().background);
+    }
+    void wrappedFindLine_data() { QTest::addColumn<bool>("light"); QTest::newRow("dark") << false; QTest::newRow("light") << true; }
+    void wrappedFindLine() {
+        QFETCH(bool, light); applyTheme(light); CodeEdit edit; edit.resize(560, 480);
+        edit.setLineWrapMode(QPlainTextEdit::WidgetWidth);
+        edit.setPlainText("before\n// 修复 " + QString("中文配置与状态 ").repeated(32) + "修复\nother\n"); edit.show(); edit.activateWindow();
+        edit.showFind(); auto query=edit.findChild<QLineEdit *>("findQuery"); auto status=edit.findChild<QLabel *>("findStatus");
+        QVERIFY(query&&status); query->setText("修复"); QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(" / 2"),5000);
+        const auto block=edit.document()->firstBlock().next(); QVERIFY(block.layout()->lineCount()>=3); QTextCursor start(block);
+        const int top=edit.cursorRect(start).top(),height=edit.fontMetrics().lineSpacing(); const auto shot=image(edit); const QColor row(light?"#f0edf8":"#363447");
+        for(int i=0;i<3;++i){const int y=top+i*height+height/2;QVERIFY(y>=0&&y<edit.viewport()->height());QCOMPARE(pixel(shot,QPoint(edit.viewport()->width()-8,y)),row);}
+        auto checkLastRow=[&](const QImage &current){
+            const auto layout=block.layout(); const auto last=layout->lineAt(layout->lineCount()-1); QTextCursor cursor(block);
+            cursor.setPosition(block.position()+last.textStart()); const int y=edit.cursorRect(cursor).center().y();
+            QVERIFY(y>=0&&y<edit.viewport()->height()); QCOMPARE(pixel(current,QPoint(edit.viewport()->width()-3,y)),row);
+        };
+        checkLastRow(shot);
+        const QTextCursor previous(block.previous()); QCOMPARE(pixel(shot,QPoint(edit.viewport()->width()-8,edit.cursorRect(previous).center().y())),colors().background);
+        QVERIFY(colorPixels(shot,QColor("#eaa13b"))>0); QVERIFY(colorPixels(shot,QColor("#f6d75d"))>0);
+        save(shot,light?"light-find-wrap":"dark-find-wrap");
+        const int oldCount=block.layout()->lineCount(); edit.resize(420,480); settle(); QVERIFY(block.layout()->lineCount()>oldCount); checkLastRow(image(edit));
+        QFont larger=edit.font(); larger.setPixelSize(qMax(1,edit.fontMetrics().height()+3)); edit.setFont(larger); settle(); checkLastRow(image(edit));
+    }
+    void denseAdvancedSelectionDoesNotRebuildHighlights() {
+        CodeEdit edit; edit.resize(700, 360);
+        SearchOutcome result; QString text;
+        for (int row=0;row<2500;++row) {
+            const int offset=int(text.size()); const QString line="aa aa aa aa";
+            result.lines.append({row+1,offset,line,{{0,2},{3,2},{6,2},{9,2}}}); text+=line+'\n';
+        }
+        edit.setPlainText(text); edit.document()->setModified(false); edit.show(); edit.activateWindow(); edit.setFocus(); settle();
+        edit.setAdvancedSearch(result); QTextCursor current(edit.document()); current.setPosition(0); current.setPosition(2,QTextCursor::KeepAnchor);
+        edit.setAdvancedSearchCurrent(0,current); const auto rebuilds=edit.highlightRebuildCount;
+        edit.setTextCursor(current); QVERIFY(edit.styleSheet().contains("selection-color"));
+        for (int i=0;i<300;++i) {
+            QTextCursor drag(edit.document()); drag.setPosition(0); drag.setPosition(3+i,QTextCursor::KeepAnchor); edit.setTextCursor(drag);
+        }
+        QVERIFY(edit.styleSheet().isEmpty()); QCOMPARE(edit.highlightRebuildCount,rebuilds);
+        QCOMPARE(edit.extraSelections().size(),10001); QCOMPARE(edit.toPlainText(),text); QVERIFY(!edit.document()->isModified());
+        edit.setTextCursor(current); QVERIFY(edit.styleSheet().contains("selection-color")); QCOMPARE(edit.highlightRebuildCount,rebuilds);
+    }
+    void plainDragRepaintsOnlyAffectedRows() {
+        struct PaintObserver : QObject {
+            QList<QRect> paints;
+            bool eventFilter(QObject *object, QEvent *event) override {
+                if (event->type()==QEvent::Paint) paints.append(static_cast<QPaintEvent *>(event)->rect());
+                return QObject::eventFilter(object,event);
+            }
+        } observer;
+        CodeEdit edit; edit.resize(700,360); QString text;
+        for(int i=0;i<10000;++i) text+=QString("const item_%1 = 中文选择文本;\n").arg(i);
+        edit.setPlainText(text); edit.show(); edit.activateWindow(); edit.setFocus(); settle();
+        edit.viewport()->installEventFilter(&observer); QTest::mousePress(edit.viewport(),Qt::LeftButton,{},QPoint(30,15)); settle(); observer.paints.clear();
+        const QPoint point(180,15); QMouseEvent move(QEvent::MouseMove,point,edit.viewport()->mapToGlobal(point),Qt::NoButton,Qt::LeftButton,Qt::NoModifier);
+        QApplication::sendEvent(edit.viewport(),&move); QTRY_VERIFY(!observer.paints.isEmpty());
+        for(const auto &rect:observer.paints) QVERIFY2(rect.height()<edit.viewport()->height(),"A single-line drag repainted the entire editor viewport");
+        QTest::mouseRelease(edit.viewport(),Qt::LeftButton,{},point); QVERIFY(edit.textCursor().hasSelection()); QCOMPARE(edit.toPlainText(),text);
     }
 };
 

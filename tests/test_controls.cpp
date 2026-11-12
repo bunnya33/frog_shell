@@ -1,5 +1,7 @@
 #include "../src/ui/styledcombobox.h"
 #include "../src/ui/theme.h"
+#include "../src/ui/documentsearch.h"
+#include "../src/ui/uploadconflictdialog.h"
 #include <QtTest>
 namespace rs {
 class PopupEvents : public QObject {
@@ -43,6 +45,7 @@ class ControlTests : public QObject {
         QCoreApplication::setApplicationName("RabbitShellControlTests");
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, data.path());
+        QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, data.path());
         qputenv("RABBITSHELL_DATA_DIR", data.path().toUtf8());
         QApplication::setStyle("Fusion");
         for (auto path : {"C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/consola.ttf"})
@@ -51,6 +54,71 @@ class ControlTests : public QObject {
         report = qEnvironmentVariable("RABBITSHELL_TEST_REPORT_DIR", data.path());
         QVERIFY(QDir().mkpath(report));
         applyTheme(false);
+    }
+    void checkboxBehaviorAndEvidence() {
+        // Exercise real application QSS and widgets, including widgets made after a theme switch.
+        for (bool light : {false,true}) {
+            applyTheme(light);
+            for (int zoom : {-1,0,2}) {
+                UiZoom::instance().setLevel(zoom);
+                QWidget window; window.setObjectName("checkboxEvidence");
+                auto layout=new QVBoxLayout(&window);
+                auto unchecked=new QCheckBox("未选择");
+                auto checked=new QCheckBox("已选择"); checked->setChecked(true);
+                auto partial=new QCheckBox("部分选择"); partial->setTristate(true); partial->setCheckState(Qt::PartiallyChecked);
+                auto disabled=new QCheckBox("已禁用"); disabled->setEnabled(false);
+                auto disabledChecked=new QCheckBox("已禁用并选择"); disabledChecked->setChecked(true); disabledChecked->setEnabled(false);
+                auto focused=new QCheckBox("键盘焦点");
+                auto hovered=new QCheckBox("鼠标悬停");
+                auto remember=new QCheckBox("保存密码（示例）");
+                for(auto box:{unchecked,checked,partial,disabled,disabledChecked,focused,hovered,remember})layout->addWidget(box);
+                window.adjustSize(); window.show(); window.activateWindow(); focused->setFocus(Qt::TabFocusReason); settle();
+                QTest::mouseMove(hovered,hovered->rect().center()); settle();
+                const auto indicator=[&](QCheckBox *box){QStyleOptionButton option;option.initFrom(box);return box->style()->subElementRect(QStyle::SE_CheckBoxIndicator,&option,box);};
+                for(auto box:{unchecked,checked,partial,disabled,disabledChecked,focused,hovered,remember}) {
+                    const QRect rect=indicator(box);
+                    QVERIFY2(box->rect().contains(rect),qPrintable(box->text()));
+                    QVERIFY(rect.width()>=uiPx(16)); QVERIFY(rect.height()>=uiPx(16));
+                }
+                // The checked indicator must contain the actual accent color through QSS wrapping.
+                QImage image=checked->grab().toImage().convertToFormat(QImage::Format_RGB32);
+                const qreal dpr=checked->devicePixelRatioF(); const QRect ir=indicator(checked);
+                int accentPixels=0;
+                for(int y=qFloor(ir.top()*dpr);y<qCeil((ir.bottom()+1)*dpr);++y)
+                    for(int x=qFloor(ir.left()*dpr);x<qCeil((ir.right()+1)*dpr);++x)
+                        if(image.rect().contains(x,y) && QColor(image.pixel(x,y))==colors().accent)++accentPixels;
+                QVERIFY2(accentPixels>4,"The application stylesheet must forward checkbox drawing to the shared style");
+                const QImage emptyImage=unchecked->grab().toImage().convertToFormat(QImage::Format_RGB32);
+                const QRect emptyRect=indicator(unchecked);int borderPixels=0;
+                const auto brightness=[](const QColor &c){return c.red()+c.green()+c.blue();};
+                for(int y=qFloor(emptyRect.top()*dpr);y<qCeil((emptyRect.bottom()+1)*dpr);++y)
+                    for(int x=qFloor(emptyRect.left()*dpr);x<qCeil((emptyRect.right()+1)*dpr);++x)if(emptyImage.rect().contains(x,y)){
+                        const int delta=brightness(emptyImage.pixelColor(x,y))-brightness(colors().side);
+                        if(light?delta < -65:delta > 65)++borderPixels;
+                    }
+                QVERIFY2(borderPixels>4,"Unchecked indicator must have a visible border against the theme fill");
+                QVERIFY(window.grab().save(report+QString("/checkbox-%1-z%2.png").arg(light?"light":"dark").arg(zoom)));
+                QSignalSpy toggles(remember,&QCheckBox::toggled);
+                const int labelX=indicator(remember).right()+uiPx(8)+remember->fontMetrics().horizontalAdvance(remember->text())/2;
+                QTest::mouseClick(remember,Qt::LeftButton,{},QPoint(labelX,remember->height()/2));
+                QVERIFY(remember->isChecked()); QCOMPARE(toggles.size(),1);
+                remember->setFocus(); QTest::keyClick(remember,Qt::Key_Space);
+                QVERIFY(!remember->isChecked()); QCOMPARE(toggles.size(),2);
+                QSignalSpy disabledToggles(disabled,&QCheckBox::toggled);
+                QTest::mouseClick(disabled,Qt::LeftButton); QTest::keyClick(disabled,Qt::Key_Space);
+                QVERIFY(!disabled->isChecked()); QCOMPARE(disabledToggles.size(),0);
+                checked->setChecked(true); applyTheme(!light); QVERIFY(checked->isChecked()); applyTheme(light);
+                AdvancedSearchDialog search(nullptr); search.show(); settle();
+                for(const char *name:{"advancedSearchCase","advancedSearchWholeWord","advancedSearchRegex"}) {
+                    auto box=search.findChild<QCheckBox *>(name); QVERIFY(box); QVERIFY(box->isVisible());
+                    QVERIFY(box->rect().contains(indicator(box))); QVERIFY(indicator(box).width()>=uiPx(16));
+                }
+                QVERIFY(search.grab().save(report+QString("/advanced-search-%1-z%2.png").arg(light?"light":"dark").arg(zoom)));
+                UploadConflictDialog conflict("冲突","/synthetic/example.txt",false,true,nullptr);
+                conflict.show(); settle(); auto conflictBox=conflict.findChild<QCheckBox *>(); QVERIFY(conflictBox); QVERIFY(conflictBox->rect().contains(indicator(conflictBox)));
+            }
+        }
+        UiZoom::instance().setLevel(0); applyTheme(false);
     }
     void popupGeometryAndSelection_data() {
         QTest::addColumn<bool>("bottom");

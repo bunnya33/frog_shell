@@ -65,5 +65,6 @@ class UiZoomStyle : public QProxyStyle {
   public:
     int pixelMetric(PixelMetric,const QStyleOption * =nullptr,const QWidget * =nullptr) const override;
     int styleHint(StyleHint,const QStyleOption * =nullptr,const QWidget * =nullptr,QStyleHintReturn * =nullptr) const override;
+    void drawPrimitive(PrimitiveElement,const QStyleOption *,QPainter *,const QWidget * =nullptr) const override;
 };
 }

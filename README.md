@@ -2,11 +2,13 @@
 
 C++20 / Qt 6 Widgets 原生 SSH 工作区。按已确认的合并窗口原型实现，提供 Dracula 与 GitHub Light 两套主题。
 
-当前为 **0.1.43 开发版**。真实 SSH、PTY、SFTP 与本地 TCP 端口转发已接入；完成与验证状态见各版本验证记录，不将开发版视为全部功能已验收的发布版。
+当前开发版本为 **0.1.45**。真实 SSH、PTY、SFTP 与本地 TCP 端口转发已接入；完成与验证状态见各版本验证记录，不将开发版视为全部功能已验收的发布版。
 
 0.1.43 正式接入资源管理树和终端同组列表视觉，验证状态见 [0.1.43 验证记录](docs/FrogShell-0.1.43验证记录.md)。
 
-0.1.44 将更新源固定为 [bunnya33/frog_shell](https://github.com/bunnya33/frog_shell)，默认启用自动检查（可在设置中关闭，每 24 小时最多一次）。发现新版本后托盘图标切换为张嘴青蛙，右键可直接更新：Windows x64 单 EXE 下载并通过 SHA-256 校验后，沿用保存、传输和应用锁确认再重启安装；取消或失败可重试。目录包、其它平台及缺少可验证资源的发布使用手动更新。详见 [更新说明](docs/0.1.44-update.zh-CN.md)。
+0.1.45 自动检查默认开启，可在设置中关闭；启用时每次启动检查一次，运行中每 30 分钟检查一次，服务限流和更新任务可能延后检查。Windows 发布流程同时提供单 EXE 便携版、安装版和包含两者的 SHA-256 清单。安装版封装相同的便携程序，运行时沿用现有更新引擎。详见 [更新说明](docs/0.1.45-update.zh-CN.md) 和 [安装包说明](docs/0.1.45-installer.zh-CN.md)。
+
+0.1.44 将更新源固定为 [bunnya33/frog_shell](https://github.com/bunnya33/frog_shell)。发现新版本后托盘图标切换为张嘴青蛙，右键可直接更新：Windows x64 单 EXE 下载并通过 SHA-256 校验后，沿用保存、传输和应用锁确认再重启安装；取消或失败可重试。目录包、其它平台及缺少可验证资源的发布使用手动更新。当时的检查频率见 [历史更新说明](docs/0.1.44-update.zh-CN.md)。
 
 0.1.42 新增帮助 → 关于 FrogShell、Release 检查及 Windows 单 EXE 安全更新；当时的行为与验证记录见 [历史说明](docs/0.1.42-about-update.zh-CN.md) 和 [验证记录](docs/FrogShell-0.1.42验证记录.md)。
 
@@ -82,12 +84,12 @@ C++20 / Qt 6 Widgets 原生 SSH 工作区。按已确认的合并窗口原型实
 
 ## 运行
 
-Windows 0.1.41 的交付名称为 `dist/FrogShell-0.1.41-portable.exe` 单文件启动版；也可使用目录 `dist/FrogShell-0.1.41`，双击其中的 `FrogShell.exe`。首次启动显示连接管理，不预置真实服务器。新版本使用独立目录，旧目录与 portable 包保留；打包脚本通过 `-Destination` 指定目标。
+Windows 0.1.45 发布流程要求同时提供 `FrogShell-0.1.45-portable.exe` 单文件便携版、`FrogShell-0.1.45-setup.exe` 安装版以及包含两者的 `SHA256SUMS`。便携版可直接运行；安装版默认安装到当前用户的 `%LOCALAPPDATA%\Programs\FrogShell`。首次启动显示连接管理，不预置真实服务器。构建出的目录包也可从 `dist/FrogShell-0.1.45` 启动；打包脚本通过 `-Destination` 指定目标。
 
 ```powershell
-.\dist\FrogShell-0.1.41\FrogShell.exe
+.\dist\FrogShell-0.1.45\FrogShell.exe
 # 离线界面预览，不连接服务器：
-.\dist\FrogShell-0.1.41\FrogShell.exe --demo --data-dir .\build\preview-data
+.\dist\FrogShell-0.1.45\FrogShell.exe --demo --data-dir .\build\preview-data
 ```
 
 编辑区支持同排的两列、三列、四列及更多左右分屏；连续左右拆分始终保持同排，只在明确选择上下方向时建立上下布局；页签拖到中心合并、四边拆分、页签栏按位置排序，移空的组自动收起。新列只平分目标列原宽，保留其他列宽；新文件进入活动组。每组页签栏右侧同行提供分屏与合并图标，分屏主体默认向右，箭头菜单可选向右／向下；只在该组至少有两页时可用。点击哪组的按钮就操作哪组，全部合并归入点击组；编辑文件的移动与浮窗保留同一编辑器。没有额外“文件编辑”标题行。离线 demo 初始为四文件／三列，右列两页可继续拆成四列。详见 [编辑分组与面板设计](docs/RabbitShell-编辑分组与面板设计.md)。

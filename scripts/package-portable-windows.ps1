@@ -2,17 +2,19 @@
     [string]$PythonExe = '',
     [string]$Generator = 'Visual Studio 18 2026',
     [string]$Toolset = 'v143,version=14.44.35207',
-    [string]$Version = '0.1.44',
+    [string]$Version = '0.1.45',
     [string]$Source = '',
     [string]$Output = '',
-    [string]$Manifest = ''
+    [string]$Manifest = '',
+    [string]$Report = ''
 )
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path "$PSScriptRoot/..").Path
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid version' }
 $build = Join-Path $root "build/portable-$Version"
 $generated = Join-Path $build 'generated'
-$report = Join-Path $root "test-results/portable-$Version"
+if (!$Report) { $Report = Join-Path $root "test-results/portable-$Version" }
+$report = [System.IO.Path]::GetFullPath($Report)
 $productName = if ([version]$Version -ge [version]'0.1.39') { 'FrogShell' } else { 'RabbitShell' }
 if (!$Source) { $Source = Join-Path $root "dist/$productName-$Version" }
 if (!$Output) { $Output = Join-Path $root "dist/$productName-$Version-portable.exe" }

@@ -45,20 +45,6 @@ class PathLabel final : public QTextEdit {
     QSize minimumSizeHint() const override { return {0,fontMetrics().height()}; }
     QSize sizeHint() const override { return minimumSizeHint(); }
 };
-class ConflictCheckBox final : public QCheckBox {
-  public:
-    explicit ConflictCheckBox(QWidget *parent):QCheckBox("对本次其余冲突执行相同操作",parent) {}
-  protected:
-    void paintEvent(QPaintEvent *event) override {
-        QCheckBox::paintEvent(event);
-        if(isChecked())return;
-        QStyleOptionButton option;initStyleOption(&option);
-        const auto indicator=style()->subElementRect(QStyle::SE_CheckBoxIndicator,&option,this);
-        QPainter p(this);p.setRenderHint(QPainter::Antialiasing);
-        p.setPen(QPen(colors().muted,uiReal(1)));p.setBrush(Qt::NoBrush);
-        p.drawRoundedRect(QRectF(indicator).adjusted(0.5,0.5,-0.5,-0.5),uiReal(2),uiReal(2));
-    }
-};
 QLabel *plain(const QString &text, QWidget *parent) {
     auto label=new QLabel(text,parent);label->setTextFormat(Qt::PlainText);
     label->setWordWrap(true);label->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
@@ -85,7 +71,7 @@ UploadConflictDialog::UploadConflictDialog(const QString &title,const QString &p
         canOverwrite ? "替换现有文件，或保留两者并自动序号重命名。" :
         "目标类型不一致或是链接，不能替换。保留两者会自动序号重命名。",details);
     description->setProperty("muted",true);column->addWidget(description);
-    all=new ConflictCheckBox(details);all->setVisible(!moving);column->addWidget(all);
+    all=new QCheckBox("对本次其余冲突执行相同操作",details);all->setVisible(!moving);column->addWidget(all);
     row->addWidget(details,1);scroll->setWidget(body);outer->addWidget(scroll,1);
     auto footer=new QWidget(this);footer->setObjectName("conflictFooter");
     auto actions=new QHBoxLayout(footer);uiMargins(actions,20,12,20,12);uiSpacing(actions,8);actions->addStretch();

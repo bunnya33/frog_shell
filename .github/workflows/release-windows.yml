@@ -1,4 +1,4 @@
-name: Windows portable Release
+name: Windows Release
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
@@ -57,6 +57,11 @@ jobs:
           $directory = "$PWD/dist/FrogShell-$env:RELEASE_VERSION"
           ./scripts/package-windows.ps1 -QtRoot $env:QT_ROOT_DIR -OpenSSLRoot $openssl -Version $env:RELEASE_VERSION -Destination $directory
           Copy-Item docs/0.1.44-update.zh-CN.md "$directory/docs/"
+          $updateDoc = "docs/$env:RELEASE_VERSION-update.zh-CN.md"
+          if (Test-Path -LiteralPath $updateDoc -PathType Leaf) { Copy-Item -LiteralPath $updateDoc -Destination "$directory/docs/" }
+          $installerDoc = Get-ChildItem 'docs/*-installer.zh-CN.md' | Where-Object { $_.Name -match '^(\d+\.\d+\.\d+)-installer\.zh-CN\.md$' -and [version]$Matches[1] -le [version]$env:RELEASE_VERSION } | Sort-Object { [version]($_.Name -replace '-installer\.zh-CN\.md$', '') } -Descending | Select-Object -First 1
+          if (!$installerDoc) { throw 'Missing installer documentation' }
+          Copy-Item -LiteralPath $installerDoc.FullName -Destination "$directory/docs/"
           $validationRecord = "FrogShell-${env:RELEASE_VERSION}验证记录.md"
           if (!(Test-Path "docs/$validationRecord")) { throw "Missing release validation record: $validationRecord" }
           Copy-Item -LiteralPath "docs/$validationRecord" -Destination "$directory/docs/" -Force
@@ -70,14 +75,45 @@ jobs:
           if ($LASTEXITCODE) { throw 'Directory smoke failed' }
           python scripts/smoke-portable-release.py --exe "dist/FrogShell-$env:RELEASE_VERSION-portable.exe" --manifest "build/portable-$env:RELEASE_VERSION/generated/payload-manifest.json" --report build/portable-smoke
           if ($LASTEXITCODE) { throw 'Portable smoke failed' }
-          $name = "FrogShell-$env:RELEASE_VERSION-portable.exe"
-          $digest = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$digest  $name" | Set-Content dist/SHA256SUMS -Encoding utf8NoBOM
+          $digest = (Get-FileHash "dist/FrogShell-$env:RELEASE_VERSION-portable.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "PORTABLE_SHA256=$digest" >> $env:GITHUB_ENV
+      - name: Locate Inno Setup compiler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $command = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+          $compiler = if ($command) { $command.Source } else { "${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe" }
+          if (!(Test-Path -LiteralPath $compiler -PathType Leaf)) {
+            # Official, pinned vendor release; install only in this ephemeral runner's temp directory.
+            $bootstrap = Join-Path $env:RUNNER_TEMP 'innosetup-6.2.2.exe'
+            Invoke-WebRequest -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-6_2_2/innosetup-6.2.2.exe' -OutFile $bootstrap
+            $hash = (Get-FileHash -LiteralPath $bootstrap -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -cne '8117d10d00a2ad33a1390978ea3872861c330e087914410a6377b22c4c5b8563') { throw 'Inno Setup bootstrap SHA-256 mismatch' }
+            $toolDir = Join-Path $env:RUNNER_TEMP 'InnoSetup-6.2.2'
+            $process = Start-Process -FilePath $bootstrap -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/CURRENTUSER','/PORTABLE=1','/NOICONS',"/DIR=`"$toolDir`"") -WindowStyle Hidden -Wait -PassThru
+            if ($process.ExitCode -ne 0) { throw "Inno Setup bootstrap failed: $($process.ExitCode)" }
+            $compiler = Join-Path $toolDir 'ISCC.exe'
+          }
+          if (!(Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'Inno Setup compiler missing' }
+          "INNO_COMPILER=$compiler" >> $env:GITHUB_ENV
+      - name: Build and verify installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $portable = "dist/FrogShell-$env:RELEASE_VERSION-portable.exe"
+          $setup = "dist/FrogShell-$env:RELEASE_VERSION-setup.exe"
+          ./scripts/package-installer-windows.ps1 -Version $env:RELEASE_VERSION -PortableExe $portable -ExpectedSha256 $env:PORTABLE_SHA256 -Compiler $env:INNO_COMPILER
+          python scripts/verify-installer.py --setup $setup --portable $portable --version $env:RELEASE_VERSION --expected-sha256 $env:PORTABLE_SHA256 --ci-smoke --manifest "build/portable-$env:RELEASE_VERSION/generated/payload-manifest.json" --report build/installer-smoke/installer-smoke.json
+          if ($LASTEXITCODE) { throw 'Installer verification failed' }
+          $names = @("FrogShell-$env:RELEASE_VERSION-portable.exe", "FrogShell-$env:RELEASE_VERSION-setup.exe")
+          $lines = foreach ($name in $names) { "$( (Get-FileHash -LiteralPath "dist/$name" -Algorithm SHA256).Hash.ToLowerInvariant() )  $name" }
+          $lines | Set-Content dist/SHA256SUMS -Encoding utf8NoBOM
       - uses: actions/upload-artifact@v4
         with:
           name: FrogShell-${{ env.RELEASE_VERSION }}-windows-x64
           path: |
             dist/FrogShell-${{ env.RELEASE_VERSION }}-portable.exe
+            dist/FrogShell-${{ env.RELEASE_VERSION }}-setup.exe
             dist/SHA256SUMS
             build/*-smoke/*.json
       - name: Publish assets for the verified tag
@@ -87,5 +123,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          gh release create $env:RELEASE_TAG "dist/FrogShell-$env:RELEASE_VERSION-portable.exe" dist/SHA256SUMS --verify-tag --generate-notes --title "FrogShell $env:RELEASE_VERSION"
+          gh release create $env:RELEASE_TAG "dist/FrogShell-$env:RELEASE_VERSION-portable.exe" "dist/FrogShell-$env:RELEASE_VERSION-setup.exe" dist/SHA256SUMS --verify-tag --generate-notes --title "FrogShell $env:RELEASE_VERSION"
           if ($LASTEXITCODE) { throw 'Release publication failed; existing assets are never overwritten' }
