@@ -12,9 +12,15 @@ class SyntaxDiagnosticTests : public QObject {
         const auto rect = edit.syntaxAnchorRect();
         const auto red = colors().red;
         int count = 0;
-        for (int x = rect.left() + 2; x < rect.left() + 10; ++x)
-            for (int y = rect.bottom() - 3; y <= rect.bottom(); ++y)
+        for (int x = rect.left(); x <= rect.right(); ++x)
+            for (int y = rect.center().y(); y <= rect.bottom(); ++y)
                 if (image.rect().contains(x,y) && image.pixelColor(x,y) == red) ++count;
+        if (count < 5) {
+            const auto output=qEnvironmentVariable("RABBITSHELL_TEST_REPORT_DIR");
+            if(!output.isEmpty()){QDir().mkpath(output);image.save(output+"/diagnostic-anchor-failure.png");}
+            qWarning()<<"Native diagnostic"<<rect<<edit.syntaxResult.offset<<edit.extraSelections().size()
+                <<edit.send(SCI_INDICATORVALUEAT,10,edit.fromUtf16(edit.syntaxResult.offset));
+        }
         return count >= 5;
     }
 private slots:

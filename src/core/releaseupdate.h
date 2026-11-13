@@ -21,6 +21,9 @@ struct Limits {
     qint64 checksumBytes = 256 * 1024;
     qint64 downloadBytes = 512LL * 1024 * 1024;
     int inactivityTimeoutMs = 15000;
+    int downloadInactivityTimeoutMs = 120000;
+    int downloadRetries = 3;
+    int retryDelayMs = 1000; // exponential backoff; timers remain cancelable
     int requestTimeoutMs = 30000;
     int downloadTimeoutMs = 20 * 60 * 1000;
     int redirects = 5;
@@ -42,11 +45,13 @@ enum class ErrorCode {
     UnsafeUrl, Http, RateLimited, Network, Tls, Timeout, SizeLimit,
     MissingDigest, DigestMismatch, Io, Cancelled
 };
+enum class TimeoutKind { None, Inactivity, Deadline };
 struct Error {
     ErrorCode code = ErrorCode::None;
     QString message;
     int httpStatus = 0;
     QDateTime retryAfterUtc;
+    TimeoutKind timeout = TimeoutKind::None;
 };
 struct Release {
     QString version, tag, assetName;
@@ -95,6 +100,8 @@ class Client final : public QObject {
     Release release() const;
     Error lastError() const;
     bool busy() const;
+    bool canResumeDownload() const; // partial data retained only in this process
+    bool retryPending() const;
     void check(CheckMode mode = CheckMode::Manual, const Schedule &schedule = {});
     // Uses only the last checked/verified Release. No caller-supplied URL/hash.
     // Success hands ownership of the new child directory/file to integration.
@@ -105,6 +112,7 @@ class Client final : public QObject {
     void automaticAttemptStarted(const QDateTime &utc);
     void checkFinished(const rs::releaseupdate::CheckResult &result);
     void downloadProgress(qint64 received, qint64 total);
+    void downloadRetry(int attempt, int maximum, int delayMs, const rs::releaseupdate::Error &reason);
     void downloadVerified(const rs::releaseupdate::VerifiedDownload &download);
     void errorOccurred(const rs::releaseupdate::Error &error);
   private:

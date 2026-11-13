@@ -22,7 +22,7 @@ class MenuTests : public QObject {
     void setup(Workspace &w) {
         w.demo=false; w.online=true; w.directory="/root"; w.files->clear(); w.updateBreadcrumbs();
         w.session=new Session(w.profile,{},&w); w.attachSession(w.session); // Never started, no network.
-        w.resize(1180,820); w.show(); settle();jobs(w);
+        w.resize(1180,820); w.show(); w.activateWindow();settle();jobs(w);
     }
     QList<Job> jobs(Workspace &w) {
         QList<Job> out; while(!w.session->jobs.empty()){out<<w.session->jobs.front();w.session->jobs.pop_front();}w.session->queuedJobBytes=0;return out;
@@ -252,7 +252,13 @@ class MenuTests : public QObject {
         Workspace w(profile(),{},true);setup(w);auto more=w.findChild<QToolButton *>("resourceMore");QVERIFY(more);QVERIFY(!more->icon().isNull());
         QCOMPARE(more->accessibleName(),QString("更多"));
         auto checkFocus=[&](bool keyboard) {
-            QVERIFY(more->hasFocus());QCOMPARE(more->property("keyboardFocus").toBool(),keyboard);
+            // Offscreen has no window manager to reactivate the owner after
+            // the native popup closes. Restore only activation; Qt must still
+            // restore the actual button focus and its input-mode styling.
+            if(QGuiApplication::platformName()=="offscreen")QApplication::setActiveWindow(&w);
+            settle();
+            auto focus=QApplication::focusWidget();
+            QVERIFY2(more->hasFocus(),qPrintable(QString("keyboard=%1 active=%2 focus=%3/%4 visible=%5 geometry=%6,%7,%8,%9").arg(keyboard).arg(w.isActiveWindow()).arg(focus?focus->metaObject()->className():"none").arg(focus?focus->objectName():QString()).arg(more->isVisible()).arg(more->x()).arg(more->y()).arg(more->width()).arg(more->height())));QCOMPARE(more->property("keyboardFocus").toBool(),keyboard);
             const auto image=more->grab().toImage();const int edge=qMax(1,qRound(image.devicePixelRatio())),inset=4*edge;
             int n=0;for(int y=0;y<image.height();++y)for(int x=inset;x<image.width();++x)
                 if((y<edge || y>=image.height()-edge || (x>=image.width()-edge && y>=inset && y<image.height()-inset)) && image.pixelColor(x,y)==colors().accent)++n;

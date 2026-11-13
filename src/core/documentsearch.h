@@ -16,7 +16,7 @@ struct SearchOutcome {
     int matchCount = 0;
     QString error, notice;
 };
-// All offsets are UTF-16 QTextDocument positions. The worker has no configuration,
+// All offsets are UTF-16 text positions, independent of the editor engine. The worker has no configuration,
 // credentials, network, or widget access and communicates only through stdio.
 inline constexpr int searchTextLimit = 8 * 1024 * 1024;
 inline constexpr int searchRegexTextLimit = 256 * 1024;

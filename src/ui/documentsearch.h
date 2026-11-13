@@ -7,7 +7,7 @@ class Workspace;
 struct SearchSource {
     QString profileId, connectionKey, server, path;
     QPointer<Editor> editor;
-    QPointer<QTextDocument> document;
+    QPointer<EditorDocument> document;
 };
 class AdvancedSearchDialog final : public QDialog {
     Q_OBJECT
@@ -86,7 +86,7 @@ class DocumentSearchController final : public QObject {
     QPointer<CodeEdit> highlightedEditor;
     SearchSource captured, resultOrigin;
     QByteArray resultDigest;
-    QVector<QTextCursor> anchors;
+    QVector<EditorCursor> anchors;
     QPointer<QProcess> process;
     quint64 generation = 0;
     bool detached = false;

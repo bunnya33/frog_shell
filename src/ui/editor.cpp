@@ -6,6 +6,7 @@
 #include "layoutmetrics.h"
 #include "windowstyle.h"
 #include "contentfont.h"
+#include "editorlexer.h"
 namespace rs {
 namespace {
 constexpr int kSyntaxLimit = 1024 * 1024;
@@ -17,145 +18,16 @@ struct SyntaxScheduler {
 };
 SyntaxScheduler &syntaxScheduler() { static SyntaxScheduler scheduler; return scheduler; }
 }
-// Keep QPlainTextEdit's lazy layout and all of its native geometry consumers.
-// No text formats, undo commands or per-block padding/cache are stored here.
-class CodeDocumentLayout final : public QPlainTextDocumentLayout {
-  public:
-    explicit CodeDocumentLayout(QTextDocument *document) : QPlainTextDocumentLayout(document) {}
-    QRectF blockBoundingRect(const QTextBlock &block) const override {
-        auto rect = QPlainTextDocumentLayout::blockBoundingRect(block);
-        if (rect.isEmpty() || !block.isVisible() || block.layout()->lineCount() != 1) return rect;
-        const auto font = document()->defaultFont();
-        auto device = paintDevice();
-        const int dpiX = device ? device->logicalDpiX() : 0, dpiY = device ? device->logicalDpiY() : 0;
-        if (!metricsValid || font != metricsFont || device != metricsDevice || dpiX != metricsDpiX || dpiY != metricsDpiY) {
-            const QFontMetricsF metrics(font, device);
-            const int pixels = font.pixelSize() > 0 ? font.pixelSize() : QFontInfo(font).pixelSize();
-            targetHeight = qMax(1, qRound(pixels * 19.0 / 14.0));
-            fontHeight = metrics.height(); fontAscent = metrics.ascent(); metricsFont = font;
-            metricsDevice = device; metricsDpiX = dpiX; metricsDpiY = dpiY; metricsValid = true;
-        }
-        auto line = block.layout()->lineAt(0);
-        const qreal bottomMargin = block.next().isValid() ? 0 : document()->documentMargin();
-        // The base rect includes our previous line position. Remove it before
-        // computing fresh padding, including after a font/zoom change.
-        const qreal naturalHeight = rect.height() - bottomMargin - line.y();
-        const qreal baseline = qMax(line.ascent(), qreal(qCeil(qMax(qreal(0), (targetHeight - fontHeight) / 2) + fontAscent)));
-        const qreal lineY = baseline - line.ascent();
-        if (line.y() != lineY) line.setPosition(QPointF(line.x(), lineY));
-        rect.setHeight(qMax(targetHeight, line.y() + naturalHeight) + bottomMargin);
-        return rect;
-    }
-    void refreshMetrics() {
-        metricsValid = false;
-        emit documentSizeChanged(documentSize()); // Recompute the viewport's line-based scrollbar range.
-        requestUpdate();
-    }
-  private:
-    mutable bool metricsValid = false;
-    mutable QFont metricsFont;
-    mutable const QPaintDevice *metricsDevice = nullptr;
-    mutable int metricsDpiX = 0, metricsDpiY = 0;
-    mutable qreal targetHeight = 0, fontHeight = 0, fontAscent = 0;
-};
 class EditorTabBar final : public PanelTabBar {
   public:
     using PanelTabBar::PanelTabBar;
 };
-class LineNumbers : public QWidget {
-  public:
-    explicit LineNumbers(CodeEdit *edit) : QWidget(edit), edit(edit) {}
-    void paintEvent(QPaintEvent *event) override {
-        edit->paintLineNumbers(event);
-    }
-
-  private:
-    CodeEdit *edit;
-};
-class Syntax : public QSyntaxHighlighter {
-  public:
-    using QSyntaxHighlighter::QSyntaxHighlighter;
-    void highlightBlock(const QString &text) override {
-        auto c = colors();
-        // Code tokens first. The lexical pass below always owns strings/comments.
-        static const QVector<QPair<QRegularExpression, QColor Colors::*>> patterns = {
-            {QRegularExpression("\\b[A-Za-z_$][\\w$]*(?=\\s*\\()"), &Colors::syntaxFunction},
-            {QRegularExpression("\\b(return|import|from|const|let|var|function|if|else|class|def|for|while|"
-                                "async|await|try|catch|throw|new|export|in|of|pass|break|continue)\\b"),
-             &Colors::keyword},
-            {QRegularExpression("\\b(true|false|null|None|True|False|[0-9]+(?:\\.[0-9]+)?)\\b"), &Colors::syntaxNumber}};
-        for (const auto &[regex, color] : patterns) {
-            auto matches = regex.globalMatch(text);
-            while (matches.hasNext()) {
-                auto m = matches.next();
-                setFormat(int(m.capturedStart()), int(m.capturedLength()), c.*color);
-            }
-        }
-        // Small language-neutral scanner: quoted text shields #, // and /* */.
-        // States 1/2/3 carry block comments/triple-quoted text across document blocks.
-        int state = qMax(0, previousBlockState());
-        setCurrentBlockState(0);
-        const QStringView view(text);
-        for (int i = 0; i < text.size();) {
-            const int begin = i;
-            if (state) {
-                const auto close = state == 1 ? u"*/" : state == 2 ? u"'''" : u"\"\"\"";
-                const int end = int(view.indexOf(QStringView(close), i));
-                i = end < 0 ? int(text.size()) : end + (state == 1 ? 2 : 3);
-                setFormat(begin, i - begin, state == 1 ? c.comment : c.string);
-                if (end < 0) { setCurrentBlockState(state); break; }
-                state = 0;
-            } else if (view.mid(i, 2) == u"//" || text[i] == '#') {
-                setFormat(i, int(text.size()) - i, c.comment);
-                break;
-            } else if (view.mid(i, 2) == u"/*") {
-                const int end = int(view.indexOf(u"*/", i + 2));
-                i = end < 0 ? int(text.size()) : end + 2;
-                setFormat(begin, i - begin, c.comment);
-                if (end < 0) { setCurrentBlockState(1); break; }
-            } else if (text[i] == '\'' || text[i] == '"' || text[i] == '`') {
-                const auto quote = text[i];
-                const auto triple = quote == '\'' ? u"'''" : u"\"\"\"";
-                if (quote != '`' && view.mid(i, 3) == QStringView(triple)) {
-                    const int end = int(view.indexOf(QStringView(triple), i + 3));
-                    i = end < 0 ? int(text.size()) : end + 3;
-                    setFormat(begin, i - begin, c.string);
-                    if (end < 0) { setCurrentBlockState(quote == '\'' ? 2 : 3); break; }
-                } else {
-                    bool closed = false;
-                    for (++i; i < text.size();) {
-                        if (text[i] == '\\') { i = qMin(i + 2, int(text.size())); continue; }
-                        if (text[i++] == quote) { closed = true; break; }
-                    }
-                    int next = i;
-                    while (next < text.size() && text[next].isSpace()) ++next;
-                    const bool property = quote == '"' && closed && next < text.size() && text[next] == ':';
-                    setFormat(begin, i - begin, property ? c.syntaxProperty : c.string);
-                }
-            } else {
-                ++i;
-            }
-        }
-    }
-};
-CodeEdit::CodeEdit(QWidget *p) : QPlainTextEdit(p) {
-    auto doc = new QTextDocument(this);
-    lineLayout = new CodeDocumentLayout(doc);
-    doc->setDocumentLayout(lineLayout);
-    setDocument(doc); // Connect QTextControl to the final layout while the document is still empty.
-    lineNumbers = new LineNumbers(this);
-    connect(this, &QPlainTextEdit::blockCountChanged, this, [this] { updateGutter(); });
-    connect(this, &QPlainTextEdit::updateRequest, this, [this](const QRect &rect, int dy) {
-        if (dy)
-            lineNumbers->scroll(0, dy);
-        else
-            lineNumbers->update(0, rect.y(), lineNumbers->width(), rect.height());
-    });
+CodeEdit::CodeEdit(QWidget *p) : EditorSurface(p) {
     syntaxTimer = new QTimer(this);
     syntaxTimer->setSingleShot(true);
     syntaxTimer->setInterval(300);
     connect(syntaxTimer, &QTimer::timeout, this, &CodeEdit::startSyntax);
-    connect(document(), &QTextDocument::contentsChange, this, [this](int position, int removed, int added) {
+    connect(document(), &EditorDocument::bytesChanged, this, [this](int position, int removed, int added) {
         // Highlighter/theme format refreshes can emit contentsChanged without
         // changing text. They must not clear or reschedule a valid diagnostic.
         if (removed || added) { adjustAdvancedSearch(position, removed, added); scheduleSyntax(); }
@@ -165,7 +37,7 @@ CodeEdit::CodeEdit(QWidget *p) : QPlainTextEdit(p) {
     setLineWrapMode(NoWrap);
     bindContentFont(this, ContentFontRole::Editor);
     setTabStopDistance(QFontMetricsF(font(), viewport()).horizontalAdvance(' ') * 4);
-    highlighter = new Syntax(document());
+    highlighter = new EditorLexer(this);
     updateGutter();
     auto cursorChanged = [this] {
         if (locatingMatch) return;
@@ -177,8 +49,7 @@ CodeEdit::CodeEdit(QWidget *p) : QPlainTextEdit(p) {
         } else updateSearchSelectionStyle();
         updateCursorOutline();
     };
-    connect(this, &QPlainTextEdit::cursorPositionChanged, this, cursorChanged);
-    connect(this, &QPlainTextEdit::selectionChanged, this, cursorChanged);
+    connect(this, &EditorSurface::selectionChanged, this, cursorChanged);
     connect(&UiZoom::instance(), &UiZoom::changed, this, [this]{
         updateGutter();if(findPanel){findPanel->setFixedWidth(qMax(uiPx(120),qMin(uiPx(520),width()-uiPx(24))));findPanel->adjustSize();findPanel->move(qMax(0,width()-findPanel->width()-uiPx(18)),uiPx(4));}
     });
@@ -248,7 +119,7 @@ void CodeEdit::ensureFindPanel() {
     connect(prev, &QToolButton::clicked, this, [this] { locate(true); });
     connect(query, &QLineEdit::returnPressed, this, [this] { locate(); });
     connect(query, &QLineEdit::textChanged, this, [this] { scheduleFind(); });
-    connect(document(),&QTextDocument::contentsChanged,this,[this]{if(findPanel->isVisible())scheduleFind();});
+    connect(document(),&EditorDocument::contentsChanged,this,[this]{if(findPanel->isVisible())scheduleFind();});
     connect(one,&QToolButton::clicked,this,[this]{replaceMatches(false);});
     connect(all,&QToolButton::clicked,this,[this]{replaceMatches(true);});
     for(auto pair:QList<QPair<int,QToolButton *>>{{Qt::Key_C,findCase},{Qt::Key_W,findWord},{Qt::Key_R,findRegex}}){auto shortcut=new QShortcut(QKeySequence(Qt::ALT|pair.first),findPanel);connect(shortcut,&QShortcut::activated,pair.second,&QToolButton::toggle);}
@@ -312,7 +183,7 @@ void CodeEdit::startSyntax() {
     syntaxRunning = true;
 }
 QRect CodeEdit::syntaxAnchorRect() const {
-    QTextCursor cursor(document());
+    EditorCursor cursor(document());
     cursor.setPosition(qBound(0, syntaxResult.offset, document()->characterCount() - 1));
     QRect rect = cursorRect(cursor);
     const auto block = cursor.block();
@@ -342,7 +213,7 @@ bool CodeEdit::eventFilter(QObject *object,QEvent *event) {
             key->accept();if(event->type()==QEvent::KeyPress&&object==query)locate(key->modifiers().testFlag(Qt::ShiftModifier));return true;
         }
     }
-    return QPlainTextEdit::eventFilter(object,event);
+    return EditorSurface::eventFilter(object,event);
 }
 void CodeEdit::closeFind() {
     if (findPanel) findPanel->hide();
@@ -412,8 +283,8 @@ void CodeEdit::setAdvancedSearch(const SearchOutcome &result) {
             const qint64 start = qint64(line.offset) + span.start, finish = start + span.length;
             if (span.length <= 0 || start < 0 || finish > end || span.start < 0 ||
                 qint64(span.start) + span.length > line.text.size()) continue;
-            QTextCursor cursor(document()); cursor.setPosition(int(start)); cursor.setPosition(int(finish), QTextCursor::KeepAnchor);
-            advancedRanges.append({cursor, line.text.mid(span.start, span.length), int(start), int(finish), row});
+            EditorCursor cursor(document()); cursor.setPosition(int(start)); cursor.setPosition(int(finish), QTextCursor::KeepAnchor);
+            advancedRanges.append({cursor, line.text.mid(span.start, span.length), cursor.byteAnchor(), cursor.bytePosition(), row});
         }
     }
     updateHighlights();
@@ -421,12 +292,12 @@ void CodeEdit::setAdvancedSearch(const SearchOutcome &result) {
 void CodeEdit::clearAdvancedSearch() {
     clearOwnedSelection(SelectionOwner::Advanced); advancedRanges.clear(); advancedCurrent = {}; advancedCurrentRow = -1; updateHighlights();
 }
-void CodeEdit::setAdvancedSearchCurrent(int row, const QTextCursor &cursor) {
+void CodeEdit::setAdvancedSearchCurrent(int row, const EditorCursor &cursor) {
     advancedCurrentRow = row; advancedCurrent = cursor;
-    for (auto &range : advancedRanges) range.current = range.row == row && range.start == cursor.selectionStart() && range.end == cursor.selectionEnd();
+    for (auto &range : advancedRanges) range.current = range.row == row && range.start == qMin(cursor.byteAnchor(), cursor.bytePosition()) && range.end == qMax(cursor.byteAnchor(), cursor.bytePosition());
     updateHighlights();
 }
-void CodeEdit::selectAdvancedSearchCurrent(int row, const QTextCursor &cursor) {
+void CodeEdit::selectAdvancedSearchCurrent(int row, const EditorCursor &cursor) {
     searchSelection = false;
     setAdvancedSearchCurrent(row, cursor);
     locatingMatch = true; setTextCursor(cursor); locatingMatch = false;
@@ -445,11 +316,11 @@ void CodeEdit::adjustAdvancedSearch(int position, int removed, int added) {
             advancedRanges.removeAt(i); continue;
         }
         if (changeEnd <= range.start) { range.start += added - removed; range.end += added - removed; }
-        if (range.start < 0 || range.end > document()->characterCount() - 1 || range.start >= range.end) {
+        if (range.start < 0 || range.end > byteLength() || range.start >= range.end) {
             advancedRanges.removeAt(i); continue;
         }
-        range.cursor = QTextCursor(document()); range.cursor.setPosition(range.start);
-        range.cursor.setPosition(range.end, QTextCursor::KeepAnchor);
+        range.cursor = EditorCursor(document()); range.cursor.setPosition(toUtf16(range.start));
+        range.cursor.setPosition(toUtf16(range.end), QTextCursor::KeepAnchor);
         if (range.cursor.selectedText() != range.text) advancedRanges.removeAt(i);
     }
     // A zero-width current result has no painted token; discard its context on
@@ -461,27 +332,16 @@ void CodeEdit::adjustAdvancedSearch(int position, int removed, int added) {
     if (!found) { advancedCurrent = {}; advancedCurrentRow = -1; }
     updateHighlights();
 }
-void CodeEdit::appendSearchLineHighlights(QList<QTextEdit::ExtraSelection> &selections, int position) {
+void CodeEdit::appendSearchLineHighlights(QList<EditorExtraSelection> &selections, int position) {
     const auto block = document()->findBlock(position);
     if (!block.isValid()) return;
-    // QPlainTextEdit only expands FullWidthSelection to a visual line when
-    // the cursor is empty. Ensure the block is laid out, then give each wrap
-    // line its own cursor so its trailing whitespace is painted too.
-    blockBoundingRect(block);
-    const auto layout = block.layout();
-    const int count = qMax(1, layout->lineCount());
-    for (int i = 0; i < count; ++i) {
-        QTextEdit::ExtraSelection line;
-        line.cursor = QTextCursor(document());
-        line.cursor.setPosition(block.position() + (layout->lineCount() ? layout->lineAt(i).textStart() : 0));
-        line.format.setProperty(QTextFormat::FullWidthSelection, true);
-        line.format.setBackground(QColor(lightTheme() ? "#f0edf8" : "#363447"));
-        selections.append(line);
-    }
+    EditorExtraSelection line; line.cursor = EditorCursor(block);
+    line.format.setProperty(QTextFormat::FullWidthSelection, true);
+    line.format.setBackground(QColor(lightTheme() ? "#f0edf8" : "#363447")); selections.append(line);
 }
 void CodeEdit::updateHighlights() {
     ++highlightRebuildCount;
-    QList<QTextEdit::ExtraSelection> selections;
+    QList<EditorExtraSelection> selections;
     const bool activeSearch = findPanel && findPanel->isVisible() && searchSelection &&
                               currentMatch >= 0 && currentMatch < matches.size() &&
                               matches[currentMatch].start >= 0 &&
@@ -495,17 +355,17 @@ void CodeEdit::updateHighlights() {
     }
     const QColor advancedColor("#f6d75d"), advancedCurrentColor("#eaa13b"), advancedInk("#211806");
     for (const auto &range : advancedRanges) {
-        QTextEdit::ExtraSelection s; s.cursor = range.cursor;
+        EditorExtraSelection s; s.cursor = range.cursor;
         s.format.setBackground(range.current ? advancedCurrentColor : advancedColor); s.format.setForeground(advancedInk);
         selections.append(s);
     }
-    for(int i=0;i<matches.size();++i){if(matches[i].start<0||matches[i].end>document()->characterCount()-1||matches[i].start>=matches[i].end)continue;QTextEdit::ExtraSelection s;s.cursor=QTextCursor(document());s.cursor.setPosition(matches[i].start);s.cursor.setPosition(matches[i].end,QTextCursor::KeepAnchor);s.format.setBackground(i==currentMatch?currentColor:QColor("#f6d75d"));s.format.setForeground(QColor("#211806"));selections.append(s);}
+    for(int i=0;i<matches.size();++i){if(matches[i].start<0||matches[i].end>document()->characterCount()-1||matches[i].start>=matches[i].end)continue;EditorExtraSelection s;s.cursor=EditorCursor(document());s.cursor.setPosition(matches[i].start);s.cursor.setPosition(matches[i].end,QTextCursor::KeepAnchor);s.format.setBackground(i==currentMatch?currentColor:QColor("#f6d75d"));s.format.setForeground(QColor("#211806"));selections.append(s);}
     if (syntaxResult.error) {
         const int pos = qBound(0, syntaxResult.offset, document()->characterCount() - 1);
         const auto block = document()->findBlock(pos);
         if (block.isValid() && pos < block.position() + block.length() - 1) {
-            QTextEdit::ExtraSelection error;
-            error.cursor = QTextCursor(document());
+            EditorExtraSelection error;
+            error.cursor = EditorCursor(document());
             error.cursor.setPosition(pos);
             error.cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
             error.format.setUnderlineStyle(QTextCharFormat::WaveUnderline);
@@ -514,42 +374,22 @@ void CodeEdit::updateHighlights() {
         }
     }
     setExtraSelections(selections);
-    // QTextControl paints its real selection above ExtraSelections. Keep the
-    // search cursor (and replace semantics), but give only that selection the
-    // same color as the current match. Restore the application style as soon
-    // as the user changes the selection or search is cleared.
+    // Native selection remains editable. Give the owned search selection the
+    // current-match colors; ordinary user selections retain the theme colors.
     updateSearchSelectionStyle();
     viewport()->update();
 }
 void CodeEdit::updateSearchSelectionStyle() {
-    const auto selection = textCursor();
-    const bool advancedSelected = !advancedCurrent.isNull() && selection.hasSelection() &&
-        selection.selectionStart() == advancedCurrent.selectionStart() && selection.selectionEnd() == advancedCurrent.selectionEnd();
-    const bool activeSearch = findPanel && findPanel->isVisible() && searchSelection &&
-        currentMatch >= 0 && currentMatch < matches.size() && matches[currentMatch].start >= 0 &&
-        matches[currentMatch].end <= document()->characterCount() - 1;
-    const bool wanted = advancedSelected || (activeSearch && selection.hasSelection());
+    const int start = int(send(SCI_GETSELECTIONSTART)), end = int(send(SCI_GETSELECTIONEND));
+    const bool advancedSelected = !advancedCurrent.isNull() && start != end &&
+        start == qMin(advancedCurrent.byteAnchor(), advancedCurrent.bytePosition()) && end == qMax(advancedCurrent.byteAnchor(), advancedCurrent.bytePosition());
+    const bool activeSearch = findPanel && findPanel->isVisible() && searchSelection && currentMatch >= 0 && currentMatch < matches.size();
+    const bool wanted = advancedSelected || (activeSearch && start != end);
     if (wanted == searchSelectionStyle) return;
-    // Set this before changing the style: style changes can synchronously
-    // trigger more widget events. All current search selections share a color.
-    searchSelectionStyle = wanted;
-    const QString sheet = wanted ? QStringLiteral("QPlainTextEdit { selection-background-color: #eaa13b; selection-color: #211806; }") : QString();
-    if (styleSheet() != sheet) {
-        const QFont contentFont = font();
-        setStyleSheet(sheet);
-        if (font() != contentFont) setFont(contentFont);
-    }
+    searchSelectionStyle = wanted; setSearchSelectionStyle(wanted);
 }
 void CodeEdit::updateCursorOutline() {
-    const auto cursor = textCursor();
-    const QTextBlock next = hasFocus() && !cursor.hasSelection() && !searchSelection ? cursor.block() : QTextBlock();
-    if (next == outlinedBlock) return;
-    auto repaintBlock = [this](const QTextBlock &block) {
-        if (!block.isValid() || block.document() != document() || !block.isVisible()) return;
-        const QRect rect = blockBoundingGeometry(block).translated(contentOffset()).toAlignedRect();
-        viewport()->update(QRect(0, rect.top() - 2, viewport()->width(), rect.height() + 4));
-    };
-    repaintBlock(outlinedBlock); repaintBlock(next); outlinedBlock = next;
+    setCursorFrameVisible(hasFocus() && send(SCI_GETSELECTIONEMPTY) && !searchSelection);
 }
 QString CodeEdit::replacementFor(const Match &match) const {
     QString out=replacement->text();
@@ -570,17 +410,18 @@ QString CodeEdit::replacementFor(const Match &match) const {
 void CodeEdit::replaceMatches(bool all){
     if(isReadOnly()||matches.isEmpty()||findRunning||findTimer->isActive())return;
     const auto selected=matches;const int chosen=currentMatch;if(!all&&(chosen<0||chosen>=selected.size()))return;
-    QTextCursor edit(document());edit.beginEditBlock();
+    EditorCursor edit(document());edit.beginEditBlock();
     for(int i=selected.size()-1;i>=0;--i)if(all||i==chosen){edit.setPosition(selected[i].start);edit.setPosition(selected[i].end,QTextCursor::KeepAnchor);edit.insertText(replacementFor(selected[i]));}
     edit.endEditBlock();if(!all)setTextCursor(edit);scheduleFind();
 }
 void CodeEdit::refreshTheme() {
+    refreshSurfaceTheme();
     highlighter->rehighlight();
-    lineNumbers->update();
     updateHighlights();
+    updateCursorOutline();
 }
 bool CodeEdit::event(QEvent *event) {
-    const bool result = QPlainTextEdit::event(event);
+    const bool result = EditorSurface::event(event);
     switch (event->type()) {
     case QEvent::FocusIn:
     case QEvent::FocusOut:
@@ -589,51 +430,20 @@ bool CodeEdit::event(QEvent *event) {
         break;
     case QEvent::FontChange:
     case QEvent::ApplicationFontChange:
-    case QEvent::StyleChange:
     case QEvent::ScreenChangeInternal:
     case QEvent::DevicePixelRatioChange:
-        if (lineNumbers) {
-            if (lineLayout && document()->documentLayout() == lineLayout) lineLayout->refreshMetrics();
-            setTabStopDistance(QFontMetricsF(font(), viewport()).horizontalAdvance(' ') * 4);
-            updateGutter();
-            lineNumbers->update();
-            if (event->type() != QEvent::StyleChange && lineWrapMode() != NoWrap &&
-                (searchSelection || !advancedCurrent.isNull())) updateHighlights();
-        }
+        updateGutter();
         break;
     default: break;
     }
     return result;
 }
 void CodeEdit::paintEvent(QPaintEvent *event) {
-    QPlainTextEdit::paintEvent(event);
-    auto paintCurrentLine = [this, event] {
-        if (!hasFocus() || textCursor().hasSelection() || searchSelection) return;
-        const auto block = textCursor().block();
-        if (!block.isValid() || !block.isVisible()) return;
-        const QRectF bounds = blockBoundingGeometry(block).translated(contentOffset());
-        qreal height = bounds.height();
-        if (!block.next().isValid()) height -= document()->documentMargin();
-        const qreal scale = viewport()->devicePixelRatioF();
-        const qreal pixel = 1.0 / scale;
-        const qreal top = qRound(bounds.top() * scale) / scale;
-        const qreal bottom = qRound((bounds.top() + height) * scale) / scale - pixel;
-        if (bottom <= top || bottom < event->rect().top() || top > event->rect().bottom()) return;
-        QPainter painter(viewport());
-        painter.setClipRegion(event->region());
-        const QColor border(lightTheme() ? "#d0d7de" : "#44475a");
-        const qreal width = viewport()->width();
-        painter.fillRect(QRectF(0, top, width, pixel), border);
-        painter.fillRect(QRectF(0, bottom, width, pixel), border);
-        painter.fillRect(QRectF(0, top + pixel, pixel, bottom - top - pixel), border);
-        painter.fillRect(QRectF(width - pixel, top + pixel, pixel, bottom - top - pixel), border);
-    };
-    paintCurrentLine();
-    if (syntaxResult.error) {
-        // Paint independently of QTextControl's extra-selection formats: its
-        // rendering can suppress an underline at a paragraph boundary or
-        // when a syntax format/selection overlaps it. This also gives empty
-        // lines and EOF a visible anchor without altering document contents.
+    EditorSurface::paintEvent(event);
+    const auto errorBlock = document()->findBlock(syntaxResult.offset);
+    if (syntaxResult.error && errorBlock.isValid() && syntaxResult.offset >= errorBlock.position() + errorBlock.length() - 1) {
+        // Native indicators cover characters. Empty lines and EOF need a
+        // visible anchor without inserting an artificial character.
         const QRect rect = syntaxAnchorRect();
         QPainter painter(viewport());
         painter.setClipRegion(event->region());
@@ -648,41 +458,13 @@ void CodeEdit::paintEvent(QPaintEvent *event) {
     }
 }
 void CodeEdit::wheelEvent(QWheelEvent *event) {
-    // QPlainTextEdit has a separate Ctrl-wheel point-size zoom. Never invoke it
+    // EditorSurface has a separate Ctrl-wheel point-size zoom. Never invoke it
     // for hover/Find focus or extra modifiers; our preferences are logical px.
     if (event->modifiers() & (Qt::ControlModifier | contentZoomModifier)) QAbstractScrollArea::wheelEvent(event);
-    else QPlainTextEdit::wheelEvent(event);
+    else EditorSurface::wheelEvent(event);
 }
-int CodeEdit::gutterWidth() const {
-    return uiPx(16) + fontMetrics().horizontalAdvance('9') * QString::number(qMax(1, blockCount())).size();
-}
-void CodeEdit::updateGutter() {
-    setViewportMargins(gutterWidth(), 0, 0, 0);
-    lineNumbers->setGeometry(0, 0, gutterWidth(), height());
-}
-void CodeEdit::paintLineNumbers(QPaintEvent *event) {
-    QPainter painter(lineNumbers);
-    auto c = colors();
-    painter.fillRect(event->rect(), c.background);
-    painter.setPen(c.muted);
-    painter.setFont(font());
-    const QFontMetricsF metrics(font());
-    auto block = firstVisibleBlock();
-    int number = block.blockNumber();
-    qreal top = blockBoundingGeometry(block).translated(contentOffset()).top();
-    while (block.isValid() && top <= event->rect().bottom()) {
-        const qreal height = blockBoundingRect(block).height();
-        if (block.isVisible() && top + height >= event->rect().top() && block.layout()->lineCount()) {
-            const auto line = block.layout()->lineAt(0);
-            const auto text = QString::number(number + 1);
-            painter.drawText(QPointF(lineNumbers->width() - uiPx(8) - metrics.horizontalAdvance(text),
-                                     top + line.y() + line.ascent()), text);
-        }
-        top += height;
-        block = block.next();
-        ++number;
-    }
-}
+int CodeEdit::gutterWidth() const { return int(send(SCI_GETMARGINWIDTHN, 0)); }
+void CodeEdit::updateGutter() { refreshFont(); }
 void CodeEdit::showFind(bool replace) {
     ensureFindPanel();
     replaceRow->setVisible(replace);
@@ -702,10 +484,10 @@ void CodeEdit::locate(bool back) {
         if(back){currentMatch=matches.size()-1;for(int i=matches.size()-1;i>=0;--i)if(matches[i].end<=position){currentMatch=i;break;}}
         else for(int i=0;i<matches.size();++i)if(matches[i].start>=position){currentMatch=i;break;}
     }else currentMatch=(currentMatch+(back?-1:1)+matches.size())%matches.size();
-    const auto &match=matches[currentMatch];QTextCursor c(document());c.setPosition(match.start);c.setPosition(match.end,QTextCursor::KeepAnchor);locatingMatch=true;setTextCursor(c);locatingMatch=false;selectionOwner=SelectionOwner::Find;ownedSelection=c;searchSelection=true;centerCursor();paintMatches();
+    const auto &match=matches[currentMatch];EditorCursor c(document());c.setPosition(match.start);c.setPosition(match.end,QTextCursor::KeepAnchor);locatingMatch=true;setTextCursor(c);locatingMatch=false;selectionOwner=SelectionOwner::Find;ownedSelection=c;searchSelection=true;centerCursor();paintMatches();
 }
 void CodeEdit::resizeEvent(QResizeEvent *e) {
-    QPlainTextEdit::resizeEvent(e);
+    EditorSurface::resizeEvent(e);
     updateGutter();
     if (findPanel && findPanel->isVisible()) {
         findPanel->setFixedWidth(qMax(uiPx(120),qMin(uiPx(520),width()-uiPx(24))));
@@ -729,7 +511,7 @@ void CodeEdit::keyPressEvent(QKeyEvent *e) {
         if (findPanel) closeFind();
         return;
     }
-    QPlainTextEdit::keyPressEvent(e);
+    EditorSurface::keyPressEvent(e);
 }
 Editor::Editor(const QString &sid, const QString &p, const QByteArray &raw, const QByteArray &hash,
                QWidget *parent)
@@ -805,7 +587,7 @@ Editor::Editor(const QString &sid, const QString &p, const QByteArray &raw, cons
     draftTimer.setSingleShot(true);
     draftTimer.setInterval(800);
     connect(&draftTimer, &QTimer::timeout, this, &Editor::persistDraft);
-    connect(code, &QPlainTextEdit::textChanged, this, [this] {
+    connect(code, &EditorSurface::textChanged, this, [this] {
         draftTimer.start();
         emit changed();
     });

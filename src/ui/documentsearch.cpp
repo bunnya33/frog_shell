@@ -239,7 +239,7 @@ void DocumentSearchController::executeSearch() {
         publishHighlights(origin.editor,result);
         resultOrigin=origin;resultDigest=hash;anchors.clear();pendingActivation=-1;
         resultWindow->setWindowTitle("搜索结果 — "+origin.server);
-        for(const auto &line:result.lines){QTextCursor anchor(origin.document);const auto span=line.spans.first();anchor.setPosition(line.offset+span.start);anchor.setPosition(line.offset+span.start+span.length,QTextCursor::KeepAnchor);anchors.append(anchor);}
+        for(const auto &line:result.lines){EditorCursor anchor(origin.document);const auto span=line.spans.first();anchor.setPosition(line.offset+span.start);anchor.setPosition(line.offset+span.start+span.length,QTextCursor::KeepAnchor);anchors.append(anchor);}
         resultPanel->setResult(origin,options,std::move(result),dirty);dialog->setFeedback(resultPanel->outcome().lines.isEmpty()?"未找到匹配项":QString());
         if(!detached)attachResults(sourceWorkspace(origin));else {resultWindow->show();resultPanel->show();}
         emit searchFinished(true);
@@ -292,7 +292,7 @@ void DocumentSearchController::resumeActivation(){
 }
 void DocumentSearchController::navigate(Editor *editor,int row,bool reopened){
     if(OperationGate::locked()||!editor)return;auto workspace=workspaceFor(editor);if(!workspace||workspace!=sourceWorkspace(resultOrigin))return;
-    const auto &hit=resultPanel->outcome().lines[row];QTextCursor cursor(editor->code->document());
+    const auto &hit=resultPanel->outcome().lines[row];EditorCursor cursor(editor->code->document());
     if(reopened){if(digest(editor->code->toPlainText())!=resultDigest){resultPanel->setFeedback("搜索结果已过期：来源内容已变化，请重新搜索。");return;}cursor.setPosition(hit.offset+hit.spans.first().start);cursor.setPosition(cursor.position()+hit.spans.first().length,QTextCursor::KeepAnchor);}
     else {if(row>=anchors.size()||anchors[row].isNull()){resultPanel->setFeedback("搜索结果已过期，请重新搜索。");return;}cursor=anchors[row];}
     const auto block=cursor.document()->findBlock(cursor.selectionStart());
@@ -301,7 +301,7 @@ void DocumentSearchController::navigate(Editor *editor,int row,bool reopened){
     }
     if(reopened){
         publishHighlights(editor,resultPanel->outcome());resultOrigin.editor=editor;resultOrigin.document=editor->code->document();anchors.clear();
-        for(const auto &line:resultPanel->outcome().lines){QTextCursor anchor(resultOrigin.document);const auto span=line.spans.first();anchor.setPosition(line.offset+span.start);anchor.setPosition(line.offset+span.start+span.length,QTextCursor::KeepAnchor);anchors.append(anchor);}
+        for(const auto &line:resultPanel->outcome().lines){EditorCursor anchor(resultOrigin.document);const auto span=line.spans.first();anchor.setPosition(line.offset+span.start);anchor.setPosition(line.offset+span.start+span.length,QTextCursor::KeepAnchor);anchors.append(anchor);}
     }
     emit workspaceActivationRequested(workspace);workspace->openFile(editor->path);
     auto window=editor->window();window->show();if(window->isMinimized())window->showNormal();window->raise();window->activateWindow();

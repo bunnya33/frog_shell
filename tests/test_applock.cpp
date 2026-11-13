@@ -13,6 +13,7 @@
 #include "../src/core/singleinstance.h"
 #include <QtTest>
 namespace rs {
+static void appendDraft(CodeEdit *code,const QString &text) {code->moveCursor(QTextCursor::End);code->insertPlainText("\n"+text);}
 class LockSecrets final:public SecretBackend {
   public:std::atomic_int reads=0;
     SecretResult read(const QString &)override{++reads;return {SecretResult::Found,"fixture-secret",{}};}
@@ -108,10 +109,10 @@ class AppLockTests:public QObject {
     }
     void explicitExitProtectsDrafts_data(){QTest::addColumn<int>("mode");QTest::newRow("cancel")<<0;QTest::newRow("changed-during-confirm")<<1;QTest::newRow("save-fails")<<2;QTest::newRow("save-completes")<<3;}
     void explicitExitProtectsDrafts(){
-        QFETCH(int,mode);MainWindow main(true,std::make_shared<LockSecrets>());main.show();settle();auto w=main.workspaces.begin().value();auto editor=w->editors.begin().value();QVERIFY(editor);editor->code->appendPlainText("exit draft");QVERIFY(editor->dirty());
-        if(mode==3){Profile p=w->profile;p.id="second-test-workspace";auto other=new Workspace(p,{},true,nullptr,&main.repository,&main.bookmarks);main.workspaces[p.id]=other;main.tabs->addTab(other,"second");connect(other,&Workspace::readyToClose,&main,[&main,other]{main.workspaceSaveFinished(other,true);});connect(other,&Workspace::closeCancelled,&main,[&main,other]{main.workspaceSaveFinished(other,false);});auto second=other->editors.begin().value();QVERIFY(second);second->code->appendPlainText("second draft");}
+        QFETCH(int,mode);MainWindow main(true,std::make_shared<LockSecrets>());main.show();settle();auto w=main.workspaces.begin().value();auto editor=w->editors.begin().value();QVERIFY(editor);appendDraft(editor->code,"exit draft");QVERIFY(editor->dirty());
+        if(mode==3){Profile p=w->profile;p.id="second-test-workspace";auto other=new Workspace(p,{},true,nullptr,&main.repository,&main.bookmarks);main.workspaces[p.id]=other;main.tabs->addTab(other,"second");connect(other,&Workspace::readyToClose,&main,[&main,other]{main.workspaceSaveFinished(other,true);});connect(other,&Workspace::closeCancelled,&main,[&main,other]{main.workspaceSaveFinished(other,false);});auto second=other->editors.begin().value();QVERIFY(second);appendDraft(second->code,"second draft");}
         if(mode==2)editor->code->setReadOnly(true);
-        int confirmations=0,changedWarnings=0;QTimer driver;driver.setInterval(10);connect(&driver,&QTimer::timeout,&main,[&]{auto box=qobject_cast<QMessageBox *>(QApplication::activeModalWidget());if(!box)return;if(box->windowTitle()=="退出 FrogShell"){++confirmations;if(mode==1)editor->code->appendPlainText("changed while confirming");auto choice=mode==0?QMessageBox::Cancel:mode==1?QMessageBox::Discard:QMessageBox::Save;box->button(choice)->click();}else if(box->windowTitle()=="状态已变化"){++changedWarnings;box->accept();}});driver.start();main.requestExit();driver.stop();QCOMPARE(confirmations,1);
+        int confirmations=0,changedWarnings=0;QTimer driver;driver.setInterval(10);connect(&driver,&QTimer::timeout,&main,[&]{auto box=qobject_cast<QMessageBox *>(QApplication::activeModalWidget());if(!box)return;if(box->windowTitle()=="退出 FrogShell"){++confirmations;if(mode==1)appendDraft(editor->code,"changed while confirming");auto choice=mode==0?QMessageBox::Cancel:mode==1?QMessageBox::Discard:QMessageBox::Save;box->button(choice)->click();}else if(box->windowTitle()=="状态已变化"){++changedWarnings;box->accept();}});driver.start();main.requestExit();driver.stop();QCOMPARE(confirmations,1);
         if(mode==3){QCOMPARE(main.exitSavePending.size(),2);QVERIFY(!main.exiting);QTRY_VERIFY_WITH_TIMEOUT(main.finalExit,5000);QVERIFY(main.workspaces.isEmpty());QCOMPARE(confirmations,1);}
         else {QTRY_VERIFY_WITH_TIMEOUT(main.exitSavePending.isEmpty(),5000);QVERIFY(!main.exiting);QCOMPARE(main.workspaces.size(),1);QVERIFY(editor->dirty());QCOMPARE(changedWarnings,mode==1?1:0);editor->code->setReadOnly(false);editor->discardDraft();}
         qApp->setQuitOnLastWindowClosed(false);
@@ -119,7 +120,7 @@ class AppLockTests:public QObject {
     void windowsInputAccessibilityAndState(){
         AppLock lock(data->path());enable(lock.security());MainWindow main(true,std::make_shared<LockSecrets>());main.resize(1200,780);main.show();settle();
         auto workspace=main.workspaces.isEmpty()?nullptr:main.workspaces.begin().value();QVERIFY(workspace);auto count=workspace->terminalCount();const auto credentialGeneration=workspace->credentialGeneration,servicesGeneration=workspace->servicesGeneration;
-        auto edit=workspace->editors.isEmpty()?nullptr:workspace->editors.begin().value().data();QVERIFY(edit);edit->code->appendPlainText("unsaved lock fixture");const auto document=edit->code->document();const auto text=edit->code->toPlainText();
+        auto edit=workspace->editors.isEmpty()?nullptr:workspace->editors.begin().value().data();QVERIFY(edit);appendDraft(edit->code,"unsaved lock fixture");const auto document=edit->code->document();const auto text=edit->code->toPlainText();
         QDialog floating(nullptr,Qt::Window);floating.setWindowTitle("sensitive file.txt");auto fl=new QVBoxLayout(&floating);auto secret=new QLabel("sensitive-content");fl->addWidget(secret);floating.resize(640,420);floating.show();
         QDialog modal(&main);modal.setWindowTitle("pending action");auto ml=new QVBoxLayout(&modal);ml->addWidget(new QLineEdit("private input"));modal.setWindowModality(Qt::WindowModal);modal.open();settle();
         lock.lock();settle();QVERIFY(!modal.isVisible());QVERIFY(floating.isVisible());QVERIFY(secret->isHidden());QVERIFY(!secret->isEnabled());QVERIFY(main.centralWidget()->isHidden());QCOMPARE(main.windowTitle(),QString("FrogShell · 已锁定"));
@@ -129,7 +130,12 @@ class AppLockTests:public QObject {
         const auto zoom=UiZoom::instance().level();QTest::keyClick(main.windowHandle(),Qt::Key_Plus,Qt::ControlModifier);QCOMPARE(UiZoom::instance().level(),zoom);
         workspace->addTerminal();workspace->openFile("/should-not-open");workspace->reconnect();QCOMPARE(workspace->terminalCount(),count);QCOMPARE(workspace->credentialGeneration,credentialGeneration);QCOMPARE(workspace->servicesGeneration,servicesGeneration);
         QMimeData mime;mime.setUrls({QUrl::fromLocalFile(data->filePath("not-uploaded"))});QDragEnterEvent drag(QPoint(4,4),Qt::CopyAction,&mime,Qt::LeftButton,{});QApplication::sendEvent(workspace->files->viewport(),&drag);QDropEvent drop(QPointF(4,4),Qt::CopyAction,&mime,Qt::LeftButton,{});QApplication::sendEvent(workspace->files->viewport(),&drop);QCOMPARE(workspace->pendingTransfers(),0);
-        main.close();QVERIFY(lock.locked());QVERIFY(!main.isVisible());lock.activate();QVERIFY(main.isVisible());
+        const bool hasTray=main.tray&&main.tray->isVisible()&&QSystemTrayIcon::isSystemTrayAvailable();
+        main.close();QVERIFY(lock.locked());QCOMPARE(main.isVisible(),!hasTray);
+        // Offscreen has no system tray. Exercise the same hide/restore path
+        // explicitly without assuming a tray exists or bypassing the lock.
+        if(!hasTray)main.hideToTray();
+        QVERIFY(!main.isVisible());lock.activate();QVERIFY(main.isVisible());
         auto field=main.findChild<QLineEdit *>("applicationUnlockPassword");QVERIFY(field);main.windowHandle()->requestActivate();QTRY_COMPARE(qApp->focusWindow(),main.windowHandle());field->setFocus();QTRY_COMPARE(qApp->focusWidget(),static_cast<QWidget *>(field));
         // Events enter the native QWindow wrapper and must reach the lock field.
         for(char key:QByteArray("fixture-pass"))QTest::keyClick(main.windowHandle(),Qt::Key(key>='a'&&key<='z'?key-'a'+'A':key));
@@ -140,7 +146,7 @@ class AppLockTests:public QObject {
     }
     void newModalAndDirtyCloseAreCancelled(){
         AppLock lock(data->path());enable(lock.security());MainWindow main(true,std::make_shared<LockSecrets>());main.show();settle();
-        auto w=main.workspaces.begin().value();auto editor=w->editors.begin().value();QVERIFY(editor);editor->code->appendPlainText("keep dirty draft");QVERIFY(editor->dirty());
+        auto w=main.workspaces.begin().value();auto editor=w->editors.begin().value();QVERIFY(editor);appendDraft(editor->code,"keep dirty draft");QVERIFY(editor->dirty());
         QTimer::singleShot(0,&lock,&AppLock::lock);w->closePage(editor);QVERIFY(lock.locked());QVERIFY(editor&&editor->dirty());QVERIFY(w->editors.values().contains(editor));
         QDialog createdLocked(&main);auto layout=new QVBoxLayout(&createdLocked);layout->addWidget(new QLabel("pending private text"));
         QTimer::singleShot(1000,&createdLocked,&QDialog::accept);QCOMPARE(createdLocked.exec(),int(QDialog::Rejected));unlock(lock);
@@ -148,7 +154,7 @@ class AppLockTests:public QObject {
     }
     void realFloatingEditorRoute(){
         AppLock lock(data->path());enable(lock.security());MainWindow main(true,std::make_shared<LockSecrets>());main.resize(1440,900);main.show();settle();
-        auto workspace=main.workspaces.begin().value();auto editor=workspace->editors.begin().value();QVERIFY(editor);editor->code->appendPlainText("floating draft");auto document=editor->code->document();auto text=editor->code->toPlainText();
+        auto workspace=main.workspaces.begin().value();auto editor=workspace->editors.begin().value();QVERIFY(editor);appendDraft(editor->code,"floating draft");auto document=editor->code->document();auto text=editor->code->toPlainText();
         workspace->floatPage(editor);settle();auto floating=workspace->floating.value(editor);QVERIFY(floating);QCOMPARE(floating->parentWidget(),workspace);QVERIFY(floating->isVisible());const auto parent=editor->parentWidget();
         lock.lock();settle();QVERIFY(floating->isVisible());QVERIFY(floating->isEnabled());auto surface=floating->findChild<QWidget *>("applicationLockSurface");QVERIFY(surface);auto password=surface->findChild<QLineEdit *>();QVERIFY(password);QVERIFY(password->isEnabled());
         floating->windowHandle()->requestActivate();QTRY_COMPARE(qApp->focusWindow(),floating->windowHandle());password->setFocus();QTRY_COMPARE(qApp->focusWidget(),static_cast<QWidget *>(password));for(char key:QByteArray("fixture-pass"))QTest::keyClick(floating->windowHandle(),Qt::Key(key>='a'&&key<='z'?key-'a'+'A':key));QCOMPARE(password->text(),QString("fixture-pass"));QTest::keyClick(floating->windowHandle(),Qt::Key_Return);

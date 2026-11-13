@@ -2,7 +2,8 @@
 
 | Component | Version used in this Windows build | License / source |
 | --- | --- | --- |
-| Qt Core, Gui, Widgets, Network | 6.8.3, dynamic libraries | LGPL-3.0 / GPL / commercial; https://www.qt.io/licensing/ |
+| Qt Core, Gui, Widgets, Network, Core5Compat | 6.8.3, dynamic libraries | LGPL-3.0 / GPL / commercial; https://www.qt.io/licensing/ |
+| Scintilla official Qt interface | 5.5.7, static | Scintilla permissive license; https://www.scintilla.org/; `licenses/Scintilla.txt`; font adaptation documented in `patches/scintilla-5.5.7.md` |
 | libssh2 | 1.11.1 | BSD-3-Clause; https://www.libssh2.org/ |
 | libvterm | 0.3.3 | MIT; https://www.leonerd.org.uk/code/libvterm/ |
 | libyaml | 0.2.5, static | MIT; https://github.com/yaml/libyaml; `licenses/libyaml.txt` |
@@ -24,6 +25,7 @@ RabbitShell 0.1.16 applies a narrow MIT-covered local resize/pending-wrap patch 
 Source archives used by CMake:
 
 - https://www.libssh2.org/download/libssh2-1.11.1.tar.gz — SHA-256 `d9ec76cbe34db98eec3539fe2c899d26b0c837cb3eb466a56b0f109cabf658f7`
+- https://www.scintilla.org/scintilla557.zip — SHA-256 `801faef6a2404ec4cbe6f22c853d9bb63fc5e18f169f302a9c69b9d6f93349dd`
 - https://www.leonerd.org.uk/code/libvterm/libvterm-0.3.3.tar.gz — SHA-256 `09156f43dd2128bd347cbeebe50d9a571d32c64e0cf18d211197946aff7226e0`
 - https://download.qt.io/archive/qt/6.8/6.8.3/submodules/qtbase-everywhere-src-6.8.3.tar.xz
 - https://github.com/openssl/openssl/releases/tag/openssl-3.0.16

@@ -135,7 +135,7 @@ struct Client::Impl {
     Limits limits;
     QPointer<QNetworkAccessManager> manager;
     QPointer<QNetworkReply> reply;
-    QTimer idle, deadline;
+    QTimer idle, deadline, retryTimer;
     State state = State::Idle;
     Error lastError;
     Release release;
@@ -147,6 +147,10 @@ struct Client::Impl {
     QUrl logicalUrl, metadataUrl, checksumUrl;
     qint64 checksumSize = 0, written = 0;
     int redirectCount = 0;
+    int retryCount = 0;
+    qint64 requestedOffset = 0;
+    bool responseAccepted = false, resumable = false;
+    QByteArray entityTag;
     quint64 operation = 0, request = 0;
     QByteArray buffer;
     std::unique_ptr<QTemporaryDir> temporary;
@@ -155,9 +159,16 @@ struct Client::Impl {
 
     Impl(Client *owner, const Config &c, QNetworkAccessManager *transport, const Limits &l)
         : q(owner), config(c), limits(l), manager(transport ? transport : new QNetworkAccessManager(owner)) {
-        idle.setSingleShot(true); deadline.setSingleShot(true);
-        QObject::connect(&idle,&QTimer::timeout,q,[this]{if (busy()) fail(error(ErrorCode::Timeout,"Network inactivity timeout"));});
-        QObject::connect(&deadline,&QTimer::timeout,q,[this]{if (busy()) fail(error(ErrorCode::Timeout,"Update request deadline exceeded"));});
+        idle.setSingleShot(true); deadline.setSingleShot(true); retryTimer.setSingleShot(true);
+        QObject::connect(&idle,&QTimer::timeout,q,[this]{
+            if (!busy()) return;
+            auto e=error(ErrorCode::Timeout,"Network inactivity timeout");e.timeout=TimeoutKind::Inactivity;
+            recover(e);
+        });
+        QObject::connect(&deadline,&QTimer::timeout,q,[this]{
+            if (!busy()) return;
+            auto e=error(ErrorCode::Timeout,"Update request deadline exceeded");e.timeout=TimeoutKind::Deadline;fail(e);
+        });
     }
     bool busy() const { return phase != Phase::None; }
     bool transition(State next, const QString &message) {
@@ -168,6 +179,9 @@ struct Client::Impl {
                limits.checksumBytes > 0 && limits.checksumBytes <= 1024*1024 &&
                limits.downloadBytes > 0 && limits.downloadBytes <= 2LL*1024*1024*1024 &&
                limits.inactivityTimeoutMs > 0 && limits.inactivityTimeoutMs <= 120000 &&
+               limits.downloadInactivityTimeoutMs > 0 && limits.downloadInactivityTimeoutMs <= 300000 &&
+               limits.downloadRetries >= 0 && limits.downloadRetries <= 5 &&
+               limits.retryDelayMs > 0 && limits.retryDelayMs <= 10000 &&
                limits.requestTimeoutMs > 0 && limits.requestTimeoutMs <= 300000 &&
                limits.downloadTimeoutMs > 0 && limits.downloadTimeoutMs <= 2*60*60*1000 &&
                limits.redirects >= 0 && limits.redirects <= 10;
@@ -179,12 +193,15 @@ struct Client::Impl {
     }
     void cleanOutput() {
         if (output) output->cancelWriting();
-        output.reset(); hash.reset(); temporary.reset(); written = 0;
+        output.reset(); hash.reset(); temporary.reset(); written = 0; resumable=false;entityTag.clear();
     }
-    void resetNetwork() { stopReply(); deadline.stop(); buffer.clear(); }
-    void fail(const Error &e) {
+    void resetNetwork() { stopReply(); deadline.stop(); retryTimer.stop();QObject::disconnect(&retryTimer,nullptr,q,nullptr);buffer.clear(); }
+    void fail(const Error &e, bool retainPartial=false) {
         const bool wasCheck = phase == Phase::Metadata || phase == Phase::Checksum;
-        ++operation; resetNetwork(); cleanOutput(); phase = Phase::None; lastError = e;
+        ++operation; resetNetwork();
+        resumable=retainPartial&&written>0&&written<release.size&&output&&hash&&temporary;
+        if(!resumable)cleanOutput();
+        phase = Phase::None; lastError = e;
         const auto op=operation;
         const auto result = CheckResult{State::Failed,release,e,false};
         QPointer<Client> guard(q);
@@ -192,6 +209,29 @@ struct Client::Impl {
         if(operation!=op)return;
         emit q->errorOccurred(e); if (!guard || operation!=op) return;
         if (wasCheck) emit q->checkFinished(result);
+    }
+    int idleTimeout() const {return phase==Phase::Payload?limits.downloadInactivityTimeoutMs:limits.inactivityTimeoutMs;}
+    // Retry only transport interruptions and explicitly temporary HTTP failures.
+    // Signed CDN URLs may expire, so every attempt starts at the owned Release URL.
+    void recover(const Error &e, int minimumDelay=0) {
+        if(phase!=Phase::Payload){fail(e);return;}
+        if(written==release.size){stopReply();completeDownload();return;}
+        if(retryCount>=limits.downloadRetries){fail(e,true);return;}
+        const int delay=qMax(minimumDelay,limits.retryDelayMs*(1<<retryCount));
+        if(delay>120000){fail(e,true);return;}
+        stopReply();buffer.clear();redirectCount=0;++retryCount;
+        const auto op=operation;
+        QObject::disconnect(&retryTimer,nullptr,q,nullptr);
+        QObject::connect(&retryTimer,&QTimer::timeout,q,[this,op]{if(operation==op&&phase==Phase::Payload)startRequest(release.downloadUrl);});
+        retryTimer.start(delay);
+        // Deadline is intentionally not restarted: backoff counts toward it.
+        emit q->downloadRetry(retryCount,limits.downloadRetries,delay,e);
+    }
+    bool restartOutput() {
+        const auto path=output->fileName();output->cancelWriting();output.reset();
+        output=std::make_unique<QSaveFile>(path);output->setDirectWriteFallback(false);
+        if(!output->open(QIODevice::WriteOnly)){fail(error(ErrorCode::Io,"Unable to restart update staging file"));return false;}
+        hash=std::make_unique<QCryptographicHash>(QCryptographicHash::Sha256);written=0;entityTag.clear();return true;
     }
     void finishCheck(State next, const Error &e = {}) {
         resetNetwork(); phase = Phase::None; lastError = e;
@@ -205,7 +245,8 @@ struct Client::Impl {
     bool metadataAllowed(const QUrl &url) const { return secure(url) && url == metadataUrl; }
     void startRequest(const QUrl &url) {
         if (!manager || manager->thread() != q->thread()) { fail(error(ErrorCode::InvalidConfiguration,"Transport must outlive Client and share its thread")); return; }
-        stopReply(); logicalUrl = url; buffer.clear();
+        stopReply(); logicalUrl = url; buffer.clear();responseAccepted=false;
+        requestedOffset=phase==Phase::Payload?written:0;
         QNetworkRequest req(url);
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,QNetworkRequest::ManualRedirectPolicy);
         req.setAttribute(QNetworkRequest::AuthenticationReuseAttribute,QNetworkRequest::Manual);
@@ -214,15 +255,19 @@ struct Client::Impl {
         req.setRawHeader("User-Agent","FrogShell-ReleaseUpdate/1");
         req.setRawHeader("Accept",phase == Phase::Metadata ? "application/vnd.github+json" : "application/octet-stream");
         req.setRawHeader("Accept-Encoding","identity");
+        if(requestedOffset>0){
+            req.setRawHeader("Range","bytes="+QByteArray::number(requestedOffset)+"-");
+            if(!entityTag.isEmpty())req.setRawHeader("If-Range",entityTag);
+        }
         if (phase == Phase::Metadata) req.setRawHeader("X-GitHub-Api-Version","2022-11-28");
         auto r = manager->get(req); reply = r; r->setReadBufferSize(128*1024);
         const quint64 id = request, op = operation;
         auto active = [this,r,id,op]{return reply == r && request == id && operation == op;};
         QObject::connect(r,&QNetworkReply::metaDataChanged,q,[this,active]{if(active()) headers();});
-        QObject::connect(r,&QIODevice::readyRead,q,[this,active]{if(active()){idle.start(limits.inactivityTimeoutMs); drain();}});
+        QObject::connect(r,&QIODevice::readyRead,q,[this,active]{if(active()){idle.start(idleTimeout()); drain();}});
         QObject::connect(r,&QNetworkReply::sslErrors,q,[this,active](const QList<QSslError>&){if(active())fail(error(ErrorCode::Tls,"TLS certificate verification failed"));});
         QObject::connect(r,&QNetworkReply::finished,q,[this,active]{if(active()) finished();});
-        idle.start(limits.inactivityTimeoutMs);
+        idle.start(idleTimeout());
     }
     Error httpError(int status) {
         Error e = error(ErrorCode::Http,QString("GitHub HTTP %1").arg(status),status);
@@ -247,8 +292,32 @@ struct Client::Impl {
         if (!reply) return false;
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (!status) return true;
-        if (status >= 300 && status <= 399) return true;
-        if (status != 200) { fail(httpError(status)); return false; }
+        if (status==301||status==302||status==303||status==307||status==308) return true;
+        if (responseAccepted) return true;
+        if (status != 200 && !(phase==Phase::Payload&&status==206)) {
+            const auto e=httpError(status);
+            if(phase==Phase::Payload&&(status==408||status==500||status==502||status==503||status==504)) {
+                int delay=0;const auto after=reply->rawHeader("Retry-After");
+                if(!after.isEmpty()){
+                    bool ok=false;const auto seconds=after.toLongLong(&ok);
+                    const auto ms=ok&&seconds>=0?qMin<qint64>(seconds,86400)*1000:QDateTime::currentDateTimeUtc().msecsTo(QDateTime::fromString(QString::fromLatin1(after),Qt::RFC2822Date));
+                    delay=int(qBound(qint64(0),ms,qint64(86400000)));
+                }
+                recover(e,delay);
+            } else fail(e);
+            return false;
+        }
+        qint64 expected=release.size;
+        if(phase==Phase::Payload&&status==206){
+            static const QRegularExpression range(QStringLiteral("^bytes ([0-9]+)-([0-9]+)/([0-9]+)$"));
+            const auto m=range.match(QString::fromLatin1(reply->rawHeader("Content-Range")));
+            bool a=false,b=false,c=false;
+            const auto start=m.captured(1).toLongLong(&a),end=m.captured(2).toLongLong(&b),total=m.captured(3).toLongLong(&c);
+            if(!m.hasMatch()||!a||!b||!c||start!=requestedOffset||end!=release.size-1||total!=release.size){
+                fail(error(ErrorCode::InvalidMetadata,"Invalid update Content-Range"));return false;
+            }
+            expected=release.size-requestedOffset;
+        }
         const qint64 maximum = phase == Phase::Payload ? qMin(limits.downloadBytes,release.size) :
                                phase == Phase::Metadata ? limits.metadataBytes : limits.checksumBytes;
         const auto rawLength = reply->rawHeader("Content-Length");
@@ -256,15 +325,25 @@ struct Client::Impl {
             bool ok = false; const qint64 size = rawLength.toLongLong(&ok);
             if (!ok || size < 0) {fail(error(ErrorCode::InvalidMetadata,"Invalid Content-Length")); return false;}
             if (size > maximum) {fail(error(ErrorCode::SizeLimit,"Response exceeds update size limit")); return false;}
-            if (phase == Phase::Payload && size != release.size) {fail(error(ErrorCode::InvalidMetadata,"Download length differs from Release asset size")); return false;}
+            if (phase == Phase::Payload && size != expected) {fail(error(ErrorCode::InvalidMetadata,"Download length differs from Release asset size")); return false;}
         }
         const auto encoding = reply->rawHeader("Content-Encoding").trimmed().toLower();
         if (!encoding.isEmpty() && encoding != "identity") {fail(error(ErrorCode::InvalidMetadata,"Encoded update responses are not accepted"));return false;}
+        if(phase==Phase::Payload){
+            // A server may ignore Range or reject If-Range by returning 200.
+            // Discard the old prefix before accepting its full response.
+            if(status==200&&requestedOffset>0&&!restartOutput())return false;
+            const auto tag=reply->rawHeader("ETag");
+            if(status==206&&!entityTag.isEmpty()&&!tag.isEmpty()&&tag!=entityTag){fail(error(ErrorCode::InvalidMetadata,"Update entity changed during resume"));return false;}
+            if(tag.startsWith('"')&&tag.endsWith('"'))entityTag=tag;
+        }
+        responseAccepted=true;
         return true;
     }
     void drain() {
         if (!headers() || !reply) return;
-        if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200) return;
+        const int status=reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (status!=200&&status!=206) return;
         const quint64 op = operation, id = request;
         int budget = 256*1024;
         while (reply && reply->bytesAvailable() && budget > 0) {
@@ -298,14 +377,27 @@ struct Client::Impl {
             startRequest(next); return;
         }
         if (!headers() || !reply) return;
-        if (reply->error() != QNetworkReply::NoError) {fail(error(ErrorCode::Network,"Update network transfer failed",status));return;}
-        if (status != 200) {fail(httpError(status));return;}
+        if(status!=200&&!(phase==Phase::Payload&&status==206)&&reply->error()==QNetworkReply::NoError){fail(error(ErrorCode::Network,"Update response has no successful HTTP status",status));return;}
         const auto savedOperation=operation,savedRequest=request;
         QPointer<Client> guard(q);drain();
         if (!guard || operation!=savedOperation || request!=savedRequest || !reply) return;
         // readBufferSize bounds the final available data; continue asynchronously
         // if an injected transport exposes more than the per-event budget.
         if (reply->bytesAvailable()) {const auto op=operation,id=request;QTimer::singleShot(0,q,[this,op,id]{if(operation==op&&request==id)finished();});return;}
+        const auto network=reply->error();
+        if(network!=QNetworkReply::NoError){
+            auto e=error(network==QNetworkReply::TimeoutError?ErrorCode::Timeout:ErrorCode::Network,"Update network transfer failed",status);
+            if(network==QNetworkReply::TimeoutError)e.timeout=TimeoutKind::Inactivity;
+            switch(network){
+            case QNetworkReply::RemoteHostClosedError:case QNetworkReply::ConnectionRefusedError:
+            case QNetworkReply::HostNotFoundError:case QNetworkReply::TimeoutError:
+            case QNetworkReply::TemporaryNetworkFailureError:case QNetworkReply::NetworkSessionFailedError:
+            case QNetworkReply::ProxyConnectionClosedError:case QNetworkReply::ProxyTimeoutError:recover(e);break;
+            default:fail(e);break;
+            }
+            return;
+        }
+        if(phase==Phase::Payload&&written<release.size){recover(error(ErrorCode::Network,"Update connection ended before all bytes arrived",status));return;}
         stopReply();
         if (phase == Phase::Metadata) parseMetadata();
         else if (phase == Phase::Checksum) parseChecksum();
@@ -387,7 +479,7 @@ struct Client::Impl {
         if (!output->commit()) {fail(error(ErrorCode::Io,"Unable to commit verified staging file"));return;}
         const VerifiedDownload result{output->fileName(),release.sha256,written,release};
         output.reset();hash.reset();
-        deadline.stop();phase=Phase::None;lastError={};
+        deadline.stop();retryTimer.stop();resumable=false;phase=Phase::None;lastError={};
         const auto op=operation;
         if(!transition(State::Ready,"Update download verified"))return;
         if(operation!=op){temporary.reset();return;}
@@ -406,14 +498,16 @@ State Client::state() const {return d->state;}
 Release Client::release() const {return d->release;}
 Error Client::lastError() const {return d->lastError;}
 bool Client::busy() const {return d->busy();}
+bool Client::canResumeDownload() const {return !d->busy()&&d->resumable;}
+bool Client::retryPending() const {return d->retryTimer.isActive();}
 void Client::setConfig(const Config &c) {
     QPointer<Client> guard(this);cancel();if(!guard)return;
     const bool changed=d->config.owner.compare(c.owner,Qt::CaseInsensitive)!=0||d->config.repository.compare(c.repository,Qt::CaseInsensitive)!=0;
-    ++d->operation;d->release={};d->lastError={};if(changed){d->rateUntil={};d->automaticAttempt={};}d->config=c;d->transition(State::Idle,{});
+    ++d->operation;d->resetNetwork();d->cleanOutput();d->release={};d->lastError={};if(changed){d->rateUntil={};d->automaticAttempt={};}d->config=c;d->transition(State::Idle,{});
 }
 void Client::check(CheckMode mode,const Schedule &schedule) {
     if(d->busy()){emit errorOccurred(error(ErrorCode::Busy,"An update operation is already running"));return;}
-    ++d->operation;d->release={};d->lastError={};d->mode=mode;d->schedule=schedule;d->clock=nowFor(schedule);d->phase=Impl::Phase::Metadata;
+    ++d->operation;d->resetNetwork();d->cleanOutput();d->release={};d->lastError={};d->mode=mode;d->schedule=schedule;d->clock=nowFor(schedule);d->phase=Impl::Phase::Metadata;
     if(d->config.owner.isEmpty()||d->config.repository.isEmpty()){d->finishCheck(State::Unconfigured);return;}
     QString reason;
     if(!validConfig(d->config,&reason)||!d->limitsValid()){d->fail(error(ErrorCode::InvalidConfiguration,reason.isEmpty()?"Invalid update resource limits":reason));return;}
@@ -441,24 +535,28 @@ void Client::check(CheckMode mode,const Schedule &schedule) {
 }
 void Client::download(const QString &directory) {
     if(d->busy()){emit errorOccurred(error(ErrorCode::Busy,"An update operation is already running"));return;}
-    if(d->state!=State::Available||d->release.sha256.size()!=32||!allowedReleaseDownloadUrl(d->release.downloadUrl,d->config)) {d->fail(error(ErrorCode::MissingDigest,"Check a verifiable update before downloading"));return;}
+    const bool resume=canResumeDownload();
+    if((d->state!=State::Available&&!resume)||d->release.sha256.size()!=32||!allowedReleaseDownloadUrl(d->release.downloadUrl,d->config)) {d->fail(error(ErrorCode::MissingDigest,"Check a verifiable update before downloading"));return;}
     const QFileInfo parent(directory);
     if(!parent.isDir()||parent.isSymLink()){d->fail(error(ErrorCode::Io,"Staging directory must be an existing local directory"));return;}
+    if(!resume){
     d->temporary=std::make_unique<QTemporaryDir>(QDir(directory).filePath("frogshell-update-XXXXXX"));
     if(!d->temporary->isValid()){d->fail(error(ErrorCode::Io,"Unable to create private update staging directory"));return;}
     QFile::setPermissions(d->temporary->path(),QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
     d->output=std::make_unique<QSaveFile>(QDir(d->temporary->path()).filePath(d->release.assetName));
     d->output->setDirectWriteFallback(false);
     if(!d->output->open(QIODevice::WriteOnly)){d->fail(error(ErrorCode::Io,"Unable to open update staging file"));return;}
-    d->hash=std::make_unique<QCryptographicHash>(QCryptographicHash::Sha256);d->written=0;d->phase=Impl::Phase::Payload;
+    d->hash=std::make_unique<QCryptographicHash>(QCryptographicHash::Sha256);d->written=0;
+    }
+    d->resumable=false;d->retryCount=0;d->phase=Impl::Phase::Payload;
     ++d->operation;const auto op=d->operation;d->redirectCount=0;d->lastError={};
     if(!d->transition(State::Downloading,"Downloading update"))return;
     if(d->operation!=op)return;
-    QPointer<Client> guard(this);emit downloadProgress(0,d->release.size);if(!guard||d->operation!=op)return;
+    QPointer<Client> guard(this);emit downloadProgress(d->written,d->release.size);if(!guard||d->operation!=op)return;
     d->deadline.start(d->limits.downloadTimeoutMs);d->startRequest(d->release.downloadUrl);
 }
 void Client::cancel() {
-    if(!d->busy())return;
+    if(!d->busy()&&!d->resumable)return;
     const bool check=d->phase==Impl::Phase::Metadata||d->phase==Impl::Phase::Checksum;
     ++d->operation;d->resetNetwork();d->cleanOutput();d->phase=Impl::Phase::None;d->lastError=error(ErrorCode::Cancelled,"Update operation cancelled");
     const CheckResult result{State::Cancelled,d->release,d->lastError,false};

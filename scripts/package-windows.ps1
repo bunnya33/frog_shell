@@ -1,7 +1,8 @@
 ﻿param(
     [string]$QtRoot = "$PSScriptRoot/../.tools/Qt/6.8.3/msvc2022_64",
     [string]$OpenSSLRoot = "$PSScriptRoot/../.tools/Qt/Tools/OpenSSLv3/Win_x64",
-    [string]$Version = '0.1.46',
+    [string]$Version = '0.1.47',
+    [string]$BuildRoot = "$PSScriptRoot/../build",
     [string]$Destination = ''
 )
 $ErrorActionPreference = 'Stop'
@@ -14,9 +15,11 @@ $qtSdk = (Resolve-Path $QtRoot).Path
 $cryptoSdk = (Resolve-Path $OpenSSLRoot).Path
 $destination = [System.IO.Path]::GetFullPath($Destination)
 New-Item -ItemType Directory -Force $destination | Out-Null
-Copy-Item -LiteralPath "$projectRoot/build/Release/FrogShell.exe" -Destination $destination
+$buildDirectory = (Resolve-Path -LiteralPath $BuildRoot).Path
+Copy-Item -LiteralPath "$buildDirectory/Release/FrogShell.exe" -Destination $destination
 & "$qtSdk/bin/windeployqt.exe" --release --no-translations --no-opengl-sw --no-system-d3d-compiler --dir $destination "$destination/FrogShell.exe"
 if ($LASTEXITCODE) { throw 'Qt deployment failed' }
+if (!(Test-Path -LiteralPath "$destination/Qt6Core5Compat.dll")) { throw 'Qt Core5Compat runtime missing; install qt5compat in the packaging Qt SDK.' }
 # Retain the platform plugin used for isolated package smoke checks without a visible desktop.
 Copy-Item -LiteralPath "$qtSdk/plugins/platforms/qoffscreen.dll" -Destination "$destination/platforms"
 Copy-Item -LiteralPath "$cryptoSdk/bin/libcrypto-3-x64.dll" -Destination $destination
@@ -35,6 +38,8 @@ else { throw 'vswhere not found; MSVC runtime deployment must be completed befor
 Copy-Item -LiteralPath "$projectRoot/third_party/licenses" -Destination $destination -Recurse -Force
 Copy-Item -LiteralPath "$projectRoot/README.md","$projectRoot/third_party/NOTICE.md" -Destination $destination
 New-Item -ItemType Directory -Force "$destination/docs" | Out-Null
+Copy-Item -LiteralPath "$projectRoot/third_party/patches/scintilla-5.5.7.md" -Destination "$destination/docs"
+Copy-Item -LiteralPath "$projectRoot/docs/editor-scintilla-migration.zh-CN.md" -Destination "$destination/docs"
 Copy-Item -LiteralPath "$projectRoot/docs/RabbitShell-Qt实现记录.md","$projectRoot/docs/RabbitShell-Qt窗口规范落实.md","$projectRoot/docs/RabbitShell-保存密码设计.md","$projectRoot/docs/RabbitShell-保存密码验证.md","$projectRoot/docs/RabbitShell-编辑分组与面板设计.md","$projectRoot/docs/RabbitShell-外观主题规范.md","$projectRoot/docs/RabbitShell-编辑分组验证.md","$projectRoot/docs/RabbitShell-交互设计检查清单.md" -Destination "$destination/docs"
 $projectDefinition = [System.IO.File]::ReadAllText("$projectRoot/CMakeLists.txt")
 Copy-Item -LiteralPath "$projectRoot/docs/RabbitShell-终端光标与复制验证.md" -Destination "$destination/docs"
@@ -112,3 +117,4 @@ Copy-Item -LiteralPath "$projectRoot/docs/FrogShell-0.1.42验证记录.md","$pro
 Copy-Item -LiteralPath "$projectRoot/docs/0.1.44-clock.zh-CN.md","$projectRoot/docs/0.1.44-update.zh-CN.md","$projectRoot/docs/0.1.44-layout.zh-CN.md","$projectRoot/docs/FrogShell-0.1.44验证记录.md" -Destination "$destination/docs"
 Copy-Item -LiteralPath "$projectRoot/docs/FrogShell-0.1.45验证记录.md","$projectRoot/docs/0.1.45-update.zh-CN.md","$projectRoot/docs/0.1.45-installer.zh-CN.md" -Destination "$destination/docs"
 Copy-Item -LiteralPath "$projectRoot/docs/FrogShell-0.1.46验证记录.md","$projectRoot/docs/0.1.46-update.zh-CN.md" -Destination "$destination/docs"
+Copy-Item -LiteralPath "$projectRoot/docs/FrogShell-0.1.47验证记录.md","$projectRoot/docs/0.1.47-update.zh-CN.md" -Destination "$destination/docs"

@@ -6,21 +6,21 @@
 #include "../core/syntaxdiagnostic.h"
 #include "../core/documentsearch.h"
 #include "theme.h"
+#include "editorsurface.h"
 class EditorHighlightTests;
 namespace rs {
-class CodeDocumentLayout;
-class CodeEdit : public QPlainTextEdit {
+class EditorLexer;
+class CodeEdit : public EditorSurface {
     Q_OBJECT
   public:
     explicit CodeEdit(QWidget *parent = nullptr);
     void showFind(bool replace = false);
     void refreshTheme();
-    void paintLineNumbers(QPaintEvent *event);
     void setSyntaxPath(const QString &path);
     void setAdvancedSearch(const SearchOutcome &result);
     void clearAdvancedSearch();
-    void setAdvancedSearchCurrent(int row, const QTextCursor &cursor);
-    void selectAdvancedSearchCurrent(int row, const QTextCursor &cursor);
+    void setAdvancedSearchCurrent(int row, const EditorCursor &cursor);
+    void selectAdvancedSearchCurrent(int row, const EditorCursor &cursor);
   signals:
     void syntaxStatusChanged(const QString &status);
 
@@ -61,19 +61,17 @@ class CodeEdit : public QPlainTextEdit {
     bool locatingMatch = false;
     enum class SelectionOwner { None, Find, Advanced };
     SelectionOwner selectionOwner = SelectionOwner::None;
-    QTextCursor ownedSelection;
+    EditorCursor ownedSelection;
     void clearOwnedSelection(SelectionOwner owner);
     bool searchSelectionStyle = false;
-    QTextBlock outlinedBlock;
+    EditorBlock outlinedBlock;
     quint64 highlightRebuildCount = 0;
-    struct AdvancedRange { QTextCursor cursor; QString text; int start = 0, end = 0, row = -1; bool current = false; };
+    struct AdvancedRange { EditorCursor cursor; QString text; int start = 0, end = 0, row = -1; bool current = false; };
     QVector<AdvancedRange> advancedRanges;
-    QTextCursor advancedCurrent;
+    EditorCursor advancedCurrent;
     int advancedCurrentRow = -1;
     void adjustAdvancedSearch(int position, int removed, int added);
-    QSyntaxHighlighter *highlighter = nullptr;
-    CodeDocumentLayout *lineLayout = nullptr;
-    QWidget *lineNumbers = nullptr;
+    EditorLexer *highlighter = nullptr;
     int gutterWidth() const;
     void updateGutter();
     void locate(bool backwards = false);
@@ -82,7 +80,7 @@ class CodeEdit : public QPlainTextEdit {
     void updateMatches();
     void paintMatches();
     void updateHighlights();
-    void appendSearchLineHighlights(QList<QTextEdit::ExtraSelection> &selections, int position);
+    void appendSearchLineHighlights(QList<EditorExtraSelection> &selections, int position);
     void updateSearchSelectionStyle();
     void updateCursorOutline();
     void closeFind();

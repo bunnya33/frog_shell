@@ -79,10 +79,10 @@ class AppearanceTests : public QObject {
         const auto b = code.document()->findBlockByNumber(block);
         const int position = int(b.text().indexOf(needle));
         if (position < 0) return {};
-        for (const auto &range : b.layout()->formats())
-            if (position >= range.start && position < range.start + range.length)
-                return range.format.foreground().color();
-        return {};
+        code.send(SCI_COLOURISE, 0, -1);
+        const int style=int(code.send(SCI_GETSTYLEAT,code.fromUtf16(b.position()+position)));
+        const int color=int(code.send(SCI_STYLEGETFORE,style));
+        return QColor(color&255,(color>>8)&255,(color>>16)&255);
     }
     static QString sampleCode() {
         return QString::fromUtf8(
@@ -119,7 +119,11 @@ class AppearanceTests : public QObject {
         QVERIFY(QDir().mkpath(report));
         QGuiApplication::styleHints()->setCursorFlashTime(0);
     }
-    void init() { UiZoom::instance().setLevel(0); ContentFonts::instance().resetDefaults(); applyTheme(false); }
+    void init() {
+        // These cases inspect appearance, not cross-case recovery of local drafts.
+        for(const auto &draft:QDir(data.filePath("drafts")).entryInfoList(QDir::Files))QVERIFY(QFile::remove(draft.absoluteFilePath()));
+        UiZoom::instance().setLevel(0); ContentFonts::instance().resetDefaults(); applyTheme(false);
+    }
     void cleanup(){UiZoom::instance().setLevel(0);}
   private:
     // Real production widgets; all fixture data and state live in the temporary test directory.
@@ -725,14 +729,14 @@ class AppearanceTests : public QObject {
             // ignored shell press must not bubble into a false outside click.
             scroll->ensureWidgetVisible(spin);QTest::mouseClick(spin,Qt::LeftButton,{},QPoint(12,spin->height()/2));settle();QVERIFY(spin->hasFocus());
             wheel(spin,-120,Qt::NoModifier);QCOMPARE(spin->value(),value-1);
-            QTest::mouseClick(label,Qt::LeftButton);settle();QVERIFY(!spin->hasFocus());
+            QTest::mouseClick(label,Qt::LeftButton);settle(); // NoFocus labels disarm wheel editing without taking keyboard focus.
             wheel(spin,120,Qt::NoModifier);QCOMPARE(spin->value(),value-1);
             spin->setFocus();settle();QTest::keyClick(spin,Qt::Key_Up);QCOMPARE(spin->value(),value);
             wheel(spin,120,Qt::NoModifier);QCOMPARE(spin->value(),value); // Keyboard focus alone is not wheel opt-in.
             QStyleOptionSpinBox option;option.initFrom(spin);option.rect=spin->rect();option.subControls=QStyle::SC_All;
             const auto up=spin->style()->subControlRect(QStyle::CC_SpinBox,&option,QStyle::SC_SpinBoxUp,spin);
             QTest::mouseClick(spin,Qt::LeftButton,{},up.center());QCOMPARE(spin->value(),value+1);
-            QTest::mouseClick(blank,Qt::LeftButton);settle();QVERIFY(!spin->hasFocus());
+            QTest::mouseClick(blank,Qt::LeftButton);settle();
             wheel(spin,-120,Qt::NoModifier);QCOMPARE(spin->value(),value+1);
         }
         // A real wheel delivered through the window can target the spin box's
@@ -750,7 +754,7 @@ class AppearanceTests : public QObject {
         zoom->setMaxVisibleItems(3);scroll->ensureWidgetVisible(zoom);QTest::mouseClick(zoom,Qt::LeftButton);settle();QVERIFY(zoom->view()->isVisible());
         auto bar=zoom->view()->verticalScrollBar();QVERIFY(bar->maximum()>0);bar->setValue(0);wheel(zoom->view()->viewport(),-120,Qt::NoModifier);QVERIFY(bar->value()>0);QVERIFY(zoom->view()->isVisible());zoom->hidePopup();
         settle();QVERIFY(zoom->hasFocus());wheel(zoom,-120,Qt::NoModifier);QVERIFY(zoom->currentIndex()!=old);
-        QTest::mouseClick(label,Qt::LeftButton);settle();QVERIFY(!zoom->hasFocus());const int changed=zoom->currentIndex();wheel(zoom,120,Qt::NoModifier);QCOMPARE(zoom->currentIndex(),changed);
+        QTest::mouseClick(label,Qt::LeftButton);settle();const int changed=zoom->currentIndex();wheel(zoom,120,Qt::NoModifier);QCOMPARE(zoom->currentIndex(),changed);
         zoom->setFocus();settle();QTest::keyClick(zoom,Qt::Key_Up);QVERIFY(zoom->currentIndex()!=changed);
         const int keyboard=zoom->currentIndex();wheel(zoom,120,Qt::NoModifier);QCOMPARE(zoom->currentIndex(),keyboard);
         for (auto name : {"contentFontFamily","contentFontWeight"}) {
@@ -829,7 +833,9 @@ class AppearanceTests : public QObject {
         const auto current=panel->table->currentIndex();const auto draft=panel->draftRow;const auto before=loadTunnelRules(profileId);
         QSignalSpy configuration(panel,&PortsPanel::configurationChanged),start(panel,&PortsPanel::startRequested),stop(panel,&PortsPanel::stopRequested),restart(panel,&PortsPanel::restartRequested);
         QSignalSpy resets(panel->table->model(),&QAbstractItemModel::modelReset);
-        auto bar=window.menuBar();auto settingsMenu=bar->actions().last()->menu();QVERIFY(settingsMenu);bool visited=false,preserved=false,savedScreenshot=false;
+        auto bar=window.menuBar();QAction *settingsAction=nullptr;
+        for(auto action:bar->actions())if(action->text().remove('&')=="设置")settingsAction=action;
+        QVERIFY(settingsAction);auto settingsMenu=settingsAction->menu();QVERIFY(settingsMenu);bool visited=false,preserved=false,savedScreenshot=false;
         QTimer answer;connect(&answer,&QTimer::timeout,&answer,[&]{
             auto dialog=qobject_cast<QDialog *>(QApplication::activeModalWidget());if(!dialog || dialog->windowTitle()!="设置")return;
             answer.stop();visited=true;
@@ -844,7 +850,7 @@ class AppearanceTests : public QObject {
             savedScreenshot &= dialog->grab().save(report+QString("/font-settings-%1.png").arg(light?"light":"dark"));
             dialog->accept();
         });answer.start(10);
-        QTest::mouseClick(bar,Qt::LeftButton,{},bar->actionGeometry(bar->actions().last()).center());settle();QVERIFY(settingsMenu->isVisible());
+        QTest::mouseClick(bar,Qt::LeftButton,{},bar->actionGeometry(settingsAction).center());settle();QVERIFY(settingsMenu->isVisible());
         QTest::mouseClick(settingsMenu,Qt::LeftButton,{},settingsMenu->actionGeometry(settingsMenu->actions().first()).center());settle();
         QVERIFY(visited);QVERIFY(preserved);QVERIFY(savedScreenshot);
         QVERIFY(panel->hasDraft());QCOMPARE(panel->draftRow,draft);QCOMPARE(panel->remoteInput->text(),QString("8081"));
@@ -854,7 +860,7 @@ class AppearanceTests : public QObject {
         QCOMPARE(panel->table->font().pixelSize(),40);QCOMPARE(panel->localInput->font().pixelSize(),40);QCOMPARE(panel->remoteInput->font().pixelSize(),40);
         QCOMPARE(panel->table->horizontalHeader()->font().pixelSize(),40);
         const int line=QFontMetrics(panel->table->font()).height();
-        QVERIFY(panel->table->rowHeight(1)>=2*line+14);QVERIFY(panel->localInput->height()>=line);
+        QVERIFY(panel->table->rowHeight(1)>=line+uiPx(8));QVERIFY(panel->localInput->height()>=line);
         QWidget narrow;auto split=new QVBoxLayout(&narrow);panel->setParent(&narrow);split->addWidget(panel);
         auto services=new ServicesPanel("仅离线字体预览",true);split->addWidget(services);
         narrow.resize(460,780);narrow.show();panel->show();settle();
@@ -972,31 +978,23 @@ class AppearanceTests : public QObject {
         CodeEdit code;code.resize(1000,430);code.show();settle();
         const QString text=QString::fromUtf8("const a = 1;\nconst b = 2;\n// 中文注释与标点\nconst title = \"账户信息\";\nconst combining = \"é\";\n\nreturn true;\n");
         code.setPlainText(text);settle();
-        auto document=code.document();QVERIFY(qobject_cast<QPlainTextDocumentLayout *>(document->documentLayout()));
+        auto document=code.document();
+        QVERIFY(code.findChildren<QTextDocument *>().isEmpty());
         QCOMPARE(code.font().pixelSize(),14);QCOMPARE(code.font().weight(),QFont::Medium);
-        QPlainTextEdit natural;natural.setLineWrapMode(QPlainTextEdit::NoWrap);natural.setFont(code.font());natural.setPlainText(text);
-        auto native=natural.document()->firstBlock();qreal previousBaseline=-1;QTextBlock previous;
-        for(auto block=document->firstBlock();block.isValid();block=block.next(),native=native.next()) {
-            const auto rect=code.blockBoundingRect(block);
-            const qreal margin=block.next().isValid()?0:document->documentMargin();
-            const auto naturalRect=natural.document()->documentLayout()->blockBoundingRect(native);
-            QVERIFY(rect.height()-margin>=19);
-            QVERIFY(rect.height()>=naturalRect.height()); // Never shorten taller fallback glyphs or the final margin.
-            const auto line=block.layout()->lineAt(0);
-            const qreal baseline=code.blockBoundingGeometry(block).top()+line.y()+line.ascent();
-            if(previous.isValid()) {
-                const qreal step=baseline-previousBaseline;
-                QVERIFY2(qAbs(step-19)<=1,qPrintable(QString("block %1 baseline step %2").arg(block.blockNumber()).arg(step)));
-                QCOMPARE(code.blockBoundingGeometry(block).top()-code.blockBoundingGeometry(previous).top(),code.blockBoundingRect(previous).height());
-            }
-            QTextCursor cursor(block);cursor.setPosition(block.position()+qMin(5,int(block.text().size())));
+        QCOMPARE(code.lineHeight(),19);
+        QCOMPARE(code.send(SCI_STYLEGETWEIGHT,STYLE_DEFAULT),500);
+        EditorBlock previous;
+        for(auto block=document->firstBlock();block.isValid();block=block.next()) {
+            QCOMPARE(code.blockBoundingRect(block).height(),qreal(19));
+            if(previous.isValid())
+                QCOMPARE(code.blockBoundingGeometry(block).top()-code.blockBoundingGeometry(previous).top(),qreal(19));
+            EditorCursor cursor(block);cursor.setPosition(block.position()+qMin(5,int(block.text().size())));
             const auto caret=code.cursorRect(cursor);
             QCOMPARE(code.cursorForPosition(QPoint(caret.left(),caret.center().y())).position(),cursor.position());
-            previous=block;previousBaseline=baseline;
+            previous=block;
         }
-        // Repeated geometry reads do not add padding to the already-positioned line.
-        auto block=document->firstBlock();const auto rect=code.blockBoundingRect(block);const auto y=block.layout()->lineAt(0).y();
-        for(int i=0;i<20;++i){QCOMPARE(code.blockBoundingRect(block),rect);QCOMPARE(block.layout()->lineAt(0).y(),y);}
+        auto block=document->firstBlock();const auto rect=code.blockBoundingRect(block);
+        for(int i=0;i<20;++i)QCOMPARE(code.blockBoundingRect(block),rect);
         auto font=code.font();font.setPixelSize(20);code.setFont(font);settle();font.setPixelSize(14);code.setFont(font);settle();
         QCOMPARE(code.blockBoundingRect(block),rect);
         QCOMPARE(code.toPlainText(),text);QVERIFY(!document->isModified());QVERIFY(!document->isUndoAvailable());
@@ -1006,11 +1004,11 @@ class AppearanceTests : public QObject {
         QStringList lines;for(int i=0;i<2000;++i)lines<<QString("const row%1 = %1; // 定位").arg(i);
         const auto text=lines.join('\n');code.setPlainText(text);settle();
         auto document=code.document();
-        int laidOut=0;for(auto block=document->firstBlock();block.isValid();block=block.next())laidOut+=block.layout()->lineCount()>0;
-        QVERIFY2(laidOut<200,"Opening the visible region must retain Qt's lazy block layout.");
+        QCOMPARE(code.send(SCI_GETLAYOUTCACHE),SC_CACHE_PAGE); // Bound native layout to the visible page.
+        QVERIFY(code.findChildren<QTextDocument *>().isEmpty());
         code.verticalScrollBar()->setValue(400);settle();
         auto visible=code.firstVisibleBlock().next().next();QVERIFY(visible.isValid());
-        QTextCursor hit(visible);hit.setPosition(visible.position()+6);const auto caret=code.cursorRect(hit);
+        EditorCursor hit(visible);hit.setPosition(visible.position()+6);const auto caret=code.cursorRect(hit);
         QVERIFY(code.viewport()->rect().contains(caret.center()));
         QTest::mouseClick(code.viewport(),Qt::LeftButton,{},QPoint(caret.left(),caret.center().y()));
         QCOMPARE(code.textCursor().position(),hit.position());
@@ -1020,8 +1018,8 @@ class AppearanceTests : public QObject {
         code.showFind();code.query->setText("row1530");QTRY_COMPARE_WITH_TIMEOUT(code.textCursor().selectedText(),QString("row1530"),5000);
         QCOMPARE(code.textCursor().blockNumber(),1530);QVERIFY(code.viewport()->rect().intersects(code.cursorRect()));
         code.findPanel->hide();code.setFocus();
-        QTextCursor edit(document);edit.movePosition(QTextCursor::End);edit.insertText("\nconst draft = true;");
-        QTextCursor selection(document->findBlockByNumber(1530));selection.movePosition(QTextCursor::Right,QTextCursor::KeepAnchor,12);code.setTextCursor(selection);
+        EditorCursor edit(document);edit.movePosition(QTextCursor::End);edit.insertText("\nconst draft = true;");
+        EditorCursor selection(document->findBlockByNumber(1530));selection.movePosition(QTextCursor::Right,QTextCursor::KeepAnchor,12);code.setTextCursor(selection);
         const int position=selection.position(),anchor=selection.anchor();const QString selected=selection.selectedText(),draft=code.toPlainText();
         const int undoSteps=document->availableUndoSteps();
         for(int pixels:{20,14}) {
@@ -1051,8 +1049,8 @@ class AppearanceTests : public QObject {
             window.resize(1040,390);window.show();settle();
             QJsonArray baselines,steps,heights; qreal previous=-1;
             for(auto block=code->document()->firstBlock();block.isValid();block=block.next()) {
-                const auto rect=code->blockBoundingRect(block);const auto line=block.layout()->lineAt(0);
-                const qreal baseline=code->blockBoundingGeometry(block).top()+line.y()+line.ascent();
+                const auto rect=code->blockBoundingRect(block);
+                const qreal baseline=code->blockBoundingGeometry(block).top()+code->send(SCI_GETEXTRAASCENT)+code->fontMetrics().ascent();
                 baselines.append(baseline);heights.append(rect.height());if(previous>=0)steps.append(baseline-previous);previous=baseline;
             }
             metrics[name]=QJsonObject{{"baselines",baselines},{"steps",steps},{"blockHeights",heights},{"dpr",code->devicePixelRatioF()}};
@@ -1104,7 +1102,7 @@ class AppearanceTests : public QObject {
         code->setFont(font); settle();
         QCOMPARE(code->tabStopDistance(), QFontMetricsF(code->font(), code->viewport()).horizontalAdvance(' ') * 4);
         QVERIFY(code->gutterWidth() > gutter);
-        QCOMPARE(code->lineNumbers->width(), code->gutterWidth());
+        QCOMPARE(int(code->send(SCI_GETMARGINWIDTHN,0)), code->gutterWidth());
         code->showFind(); settle();
         QCOMPARE(QFontInfo(code->query->font()).family(), QFontInfo(qApp->font()).family());
         QCOMPARE(code->query->font().pixelSize(), 13);

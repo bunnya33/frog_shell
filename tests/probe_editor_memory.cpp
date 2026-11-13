@@ -1,6 +1,7 @@
 #include "../src/ui/mainwindow.h"
 #include "../src/ui/theme.h"
 #include <QtTest>
+#include "../src/ui/editorlexer.h"
 #ifdef Q_OS_WIN
 #define NOMINMAX
 #include <windows.h>
@@ -40,8 +41,9 @@ class EditorMemoryTests : public QObject {
         QJsonObject result{{"round", round}, {"phase", phase}, {"largeBytes", bytes},
                            {"elapsedMs", clock.elapsed()}, {"widgets", QApplication::allWidgets().size()},
                            {"editors", workspace.findChildren<Editor *>().size()},
-                           {"documents", workspace.findChildren<QTextDocument *>().size()},
-                           {"highlighters", workspace.findChildren<QSyntaxHighlighter *>().size()},
+                           {"documents", workspace.findChildren<EditorDocument *>().size()},
+                           {"qtDocuments", workspace.findChildren<QTextDocument *>().size()},
+                           {"highlighters", workspace.findChildren<EditorLexer *>().size()},
                            {"mainTabButtons", buttons(window.tabs->tabBar())},
                            {"editorTabButtons", buttons(workspace.editArea->activeGroup()->tabBar())},
                            {"trackedAlive", retained}};
@@ -113,7 +115,7 @@ class EditorMemoryTests : public QObject {
                 opened << editor;
                 QVERIFY(editor->findChild<QLabel *>("filePathIcon"));
                 tracked << editor->findChild<QLabel *>("filePathIcon") << editor << editor->code << editor->code->document()
-                        << editor->code->document()->findChild<QSyntaxHighlighter *>();
+                        << editor->code->findChild<EditorLexer *>();
                 auto group = workspace->editArea->groupFor(editor);
                 tracked << group->tabBar()->tabButton(group->indexOf(editor), QTabBar::RightSide);
             }
@@ -155,7 +157,8 @@ class EditorMemoryTests : public QObject {
             QCOMPARE(workspace->editors.size(), 0);
             QCOMPARE(workspace->floating.size(), 0);
             QCOMPARE(workspace->findChildren<QTextDocument *>().size(), persistentDocuments);
-            QCOMPARE(workspace->findChildren<QSyntaxHighlighter *>().size(), 0);
+            QCOMPARE(workspace->findChildren<EditorDocument *>().size(), 0);
+            QCOMPARE(workspace->findChildren<EditorLexer *>().size(), 0);
             sample(window, *workspace, round, round == -1 ? "warm" : "close", int(largeText.size()), alive);
         }
         QCOMPARE(workspace->session, nullptr);

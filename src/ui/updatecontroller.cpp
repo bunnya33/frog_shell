@@ -24,7 +24,8 @@ QString chineseError(const releaseupdate::Error &error) {
     case E::RateLimited:return error.retryAfterUtc.isValid()?"请求已被限流，请在 "+error.retryAfterUtc.toLocalTime().toString("MM-dd HH:mm")+" 后重试。":"请求已被限流，请稍后重试。";
     case E::Network:return "无法连接更新服务，请检查网络后重试。";
     case E::Tls:return "无法验证更新服务的安全连接。";
-    case E::Timeout:return "更新请求超时，请重试。";
+    case E::Timeout:return error.timeout==releaseupdate::TimeoutKind::Deadline?"更新任务超过总时限，请重试。":
+        error.timeout==releaseupdate::TimeoutKind::Inactivity?"更新连接长时间未收到数据，请检查网络后重试。":"更新请求超时，请重试。";
     case E::SizeLimit:return "发布信息或下载文件超过大小限制。";
     case E::MissingDigest:return "此发布没有可验证的对应安装包，请从发布页手动下载。";
     case E::DigestMismatch:return "下载文件的 SHA-256 校验失败，未准备安装。";
@@ -70,7 +71,7 @@ struct UpdateController::Impl {
     bool preparing=false,restarting=false,approved=false,migrating=false;
     bool recoveryRequired=false,available=false,oneClick=false;
     bool startupDue=false,startupPending=true,automaticAttemptInProcess=false;
-    QString availableVersion;
+    QString availableVersion,retryStatus;
     qint64 received=0,total=0;
     Impl(UpdateController *q,const releaseupdate::Config &config,const selfupdate::PortableOrigin &origin,
          const QString &base,QNetworkAccessManager *transport):q(q),origin(origin),base(base) {
@@ -132,16 +133,16 @@ UpdateController::UpdateController(const releaseupdate::Config &runtime,const se
         case S::UpToDate:text="当前已是最新稳定版本。";break;
         case S::Available:text="发现新版本 "+d->client->release().version+"。";break;
         case S::ManualDownload:text="此发布需手动更新，请打开发布页。";break;
-        case S::Downloading:text="正在下载更新，当前连接和任务将继续运行。";break;
+        case S::Downloading:d->retryStatus.clear();text="正在下载更新，当前连接和任务将继续运行。";break;
         case S::Ready:text="下载已完成，SHA-256 校验通过。";break;
         case S::Cancelled:text="已取消更新任务。";break;
-        case S::Failed:text=chineseError(d->client->lastError());break;
+        case S::Failed:text=chineseError(d->client->lastError());if(d->client->canResumeDownload())text+=" 已保留下载进度，点击重试可继续下载。";break;
         }
         if(state==S::Failed||state==S::Cancelled)d->oneClick=false;
         d->changed(text);
     });
     connect(d->client,&releaseupdate::Client::automaticAttemptStarted,this,[this,periodic](const QDateTime &utc){d->automaticAttemptInProcess=true;QSettings().setValue("update/lastAutomaticAttemptUtc",utc);periodic->start(30*60*1000);});
-    connect(d->client,&releaseupdate::Client::errorOccurred,this,[this](const auto &error){if(error.code==releaseupdate::ErrorCode::RateLimited&&error.retryAfterUtc.isValid())QSettings().setValue("update/rateLimitUntilUtc",error.retryAfterUtc);d->changed(chineseError(error));});
+    connect(d->client,&releaseupdate::Client::errorOccurred,this,[this](const auto &error){if(error.code==releaseupdate::ErrorCode::RateLimited&&error.retryAfterUtc.isValid())QSettings().setValue("update/rateLimitUntilUtc",error.retryAfterUtc);auto text=chineseError(error);if(d->client->canResumeDownload())text+=" 已保留下载进度，点击重试可继续下载。";d->changed(text);});
     connect(d->client,&releaseupdate::Client::checkFinished,this,[this](const releaseupdate::CheckResult &result){
         if(result.state==S::Available||result.state==S::ManualDownload){d->available=true;d->availableVersion=result.release.version;}
         else if(result.state==S::UpToDate){d->available=false;d->availableVersion.clear();}
@@ -154,9 +155,12 @@ UpdateController::UpdateController(const releaseupdate::Config &runtime,const se
         if(proceed)download();
         if(d->startupDue&&d->startupPending)QTimer::singleShot(0,this,&UpdateController::tryStartupCheck);
     });
-    connect(d->client,&releaseupdate::Client::downloadProgress,this,[this](qint64 received,qint64 total){d->received=received;d->total=total;d->changed();});
+    connect(d->client,&releaseupdate::Client::downloadProgress,this,[this](qint64 received,qint64 total){d->received=received;d->total=total;const bool retried=!d->retryStatus.isEmpty();d->retryStatus.clear();d->changed(retried?QStringLiteral("正在继续下载更新…"):QString());});
+    connect(d->client,&releaseupdate::Client::downloadRetry,this,[this](int attempt,int maximum,int delay,const releaseupdate::Error &reason){
+        d->retryStatus=QString("%1 %2 秒后重试（%3/%4），保留下载进度…").arg(chineseError(reason)).arg((delay+999)/1000).arg(attempt).arg(maximum);d->changed(d->retryStatus);
+    });
     connect(d->client,&releaseupdate::Client::downloadVerified,this,[this](const auto &download){d->releaseDownload();d->verified=download;d->downloadLease=std::make_shared<DownloadLease>();d->downloadLease->download=download;const bool proceed=d->oneClick;d->oneClick=false;d->changed("下载已完成，SHA-256 校验通过。");if(proceed&&!OperationGate::locked())requestRestart();});
-    if(auto lock=AppLock::instance())connect(lock,&AppLock::lockedChanged,this,[this](bool locked){if(locked)cancel();else tryStartupCheck();});
+    if(auto lock=AppLock::instance())connect(lock,&AppLock::lockedChanged,this,[this](bool locked){if(locked){const bool active=updateBusy();cancel();if(active)d->changed("软件已锁定，更新任务已取消。");}else tryStartupCheck();});
     QTimer::singleShot(1500,this,[this]{d->startupDue=true;tryStartupCheck();});
     connect(periodic,&QTimer::timeout,this,[this]{if(d->startupPending&&d->startupDue)tryStartupCheck();else check(true);});periodic->start();
 }
@@ -193,7 +197,7 @@ bool UpdateController::automaticInstallSupported()const{return d->automaticInsta
 bool UpdateController::updateBusy()const{return d->oneClick||d->client->busy()||restartPending();}
 QString UpdateController::updateVersion()const{return d->availableVersion;}
 QString UpdateController::progressText()const {
-    if(state()==S::Downloading)return d->total>0?QString("正在下载更新 %1%…").arg(int(qMin<qint64>(100,d->received*100/d->total))):QStringLiteral("正在下载更新…");
+    if(state()==S::Downloading){if(!d->retryStatus.isEmpty())return d->retryStatus;return d->total>0?QString("正在下载更新 %1%…").arg(int(qMin<qint64>(100,d->received*100/d->total))):QStringLiteral("正在下载更新…");}
     if(d->preparing)return "正在准备更新…";
     if(d->restarting)return "正在确认退出…";
     return "正在检查更新…";
@@ -203,7 +207,7 @@ void UpdateController::requestUpdate(){
     if(!d->automaticInstall()||state()==S::ManualDownload){emit manualUpdateRequested();return;}
     if(ready()){requestRestart();return;}
     d->oneClick=true;
-    if(state()==S::Available)download();else check();
+    if(state()==S::Available||d->client->canResumeDownload())download();else check();
     if(!d->client->busy()&&!restartPending())d->oneClick=false;
     d->changed();
 }
@@ -220,7 +224,7 @@ void UpdateController::tryStartupCheck() {
 }
 void UpdateController::checkScheduled(releaseupdate::CheckMode mode) {
     const bool automatic=mode!=releaseupdate::CheckMode::Manual;
-    if(OperationGate::locked()||d->migrating||restartPending()||d->client->busy()||(automatic&&(d->oneClick||ready())))return;
+    if(OperationGate::locked()||d->migrating||restartPending()||d->client->busy()||(automatic&&(d->oneClick||ready()||d->client->canResumeDownload())))return;
     if(automatic&&!QSettings().value("update/automaticCheckEnabled",true).toBool())return;
     d->releaseDownload();d->received=d->total=0;
     QSettings settings;releaseupdate::Schedule schedule;
@@ -320,8 +324,8 @@ void UpdateController::showAbout(QWidget *parent) {
     auto sync=[=,this]{
         const auto config=configuration();source->setText(config.owner.isEmpty()?"更新源：未配置":"GitHub · "+config.owner+" / "+config.repository);status->setText(d->status);
         const bool busy=d->client->busy()||d->preparing;const bool gate=!OperationGate::locked();
-        checkButton->setEnabled(gate&&!busy&&!d->restarting);downloadButton->setVisible(state()==S::Available&&!ready());downloadButton->setEnabled(gate&&!busy);
-        cancelButton->setVisible(busy||d->restarting);cancelButton->setEnabled(gate);restartButton->setVisible(ready()&&d->automaticInstall());restartButton->setEnabled(gate&&!busy&&!d->restarting&&!d->migrating);
+        checkButton->setEnabled(gate&&!busy&&!d->restarting);downloadButton->setVisible((state()==S::Available||d->client->canResumeDownload())&&!ready());downloadButton->setText(d->client->canResumeDownload()?"重试下载":"下载更新");downloadButton->setEnabled(gate&&!busy);
+        cancelButton->setVisible(busy||d->restarting||d->client->canResumeDownload());cancelButton->setEnabled(gate);restartButton->setVisible(ready()&&d->automaticInstall());restartButton->setEnabled(gate&&!busy&&!d->restarting&&!d->migrating);
         releaseButton->setVisible(d->client->release().releaseUrl.isValid());releaseButton->setEnabled(gate&&!d->restarting);
         folderButton->setVisible(ready()&&!d->automaticInstall());folderButton->setEnabled(gate);
         progress->setVisible(state()==S::Downloading||d->preparing);progressText->setVisible(state()==S::Downloading);

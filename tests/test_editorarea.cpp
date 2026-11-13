@@ -4,6 +4,7 @@
 #include "../src/ui/icons.h"
 #include "../src/ui/theme.h"
 #include <QtTest>
+#include "../src/ui/editorlexer.h"
 #include <memory>
 namespace rs {
 class ClosePositionStyle final : public QProxyStyle {
@@ -214,8 +215,8 @@ class EditorAreaTests : public QObject {
     }
     void lazyFindRetainsBehaviorAndLifetime() {
         auto editor = new Editor("lazy-find", "/find.txt", "alpha beta alpha", "hash");
-        QPointer<QTextDocument> document = editor->code->document();
-        QPointer<QSyntaxHighlighter> highlighter = document->findChild<QSyntaxHighlighter *>();
+        QPointer<EditorDocument> document = editor->code->document();
+        QPointer<EditorLexer> highlighter = editor->code->findChild<EditorLexer *>();
         editor->resize(700, 400); editor->show(); settle();
         QCOMPARE(editor->code->findChildren<QLineEdit *>().size(), 0);
         QTest::keyClick(editor->code, Qt::Key_Escape);
@@ -223,7 +224,7 @@ class EditorAreaTests : public QObject {
         auto fields = editor->code->findChildren<QLineEdit *>();
         QCOMPARE(fields.size(), 2);
         auto query = fields[0]; query->setText("alpha");
-        QCOMPARE(editor->code->textCursor().selectedText(), QString("alpha"));
+        QTRY_COMPARE_WITH_TIMEOUT(editor->code->textCursor().selectedText(), QString("alpha"), 5000);
         editor->code->showFind(true); settle();
         QCOMPARE(editor->code->findChildren<QLineEdit *>(), fields);
         QVERIFY(fields[1]->isVisible());
@@ -714,11 +715,16 @@ class EditorAreaTests : public QObject {
         settle();
         for (bool light : {false,true}) {
             applyTheme(light); workspace.refreshTheme();
-            auto comment=third->code->document()->findBlockByNumber(1).layout()->formats();
-            auto string=third->code->document()->findBlockByNumber(2).layout()->formats();
-            QVERIFY(!comment.isEmpty()); QVERIFY(!string.isEmpty());
-            QCOMPARE(comment.last().format.foreground().color(),colors().comment);
-            QCOMPARE(string.last().format.foreground().color(),colors().string);
+            third->code->send(SCI_COLOURISE,0,-1);
+            auto colorAt=[&](int line,int column){
+                const auto block=third->code->document()->findBlockByNumber(line);
+                const auto style=third->code->send(SCI_GETSTYLEAT,third->code->fromUtf16(block.position()+column));
+                const int rgb=int(third->code->send(SCI_STYLEGETFORE,style));
+                return QColor(rgb&255,(rgb>>8)&255,(rgb>>16)&255);
+            };
+            QCOMPARE(colorAt(1,0),colors().comment);
+            const auto quoted=third->code->document()->findBlockByNumber(2).text().indexOf('\'');
+            QVERIFY(quoted>=0); QCOMPARE(colorAt(2,int(quoted)),colors().string);
             workspace.sidebar->setCurrentIndex(1);
             save(&workspace,light?"light-3-columns":"dark-3-columns");
         }

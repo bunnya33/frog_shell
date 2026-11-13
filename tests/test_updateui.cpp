@@ -39,7 +39,7 @@ class UpdateSecrets final:public SecretBackend {
 };
 class UpdateHttp final:public QObject {
   public:
-    QTcpServer server;QByteArray package=QByteArray(512*1024,'P');int requests=0,status=200;bool slow=false,corrupt=false,noUpdate=false;
+    QTcpServer server;QByteArray package=QByteArray(512*1024,'P');int requests=0,status=200;bool slow=false,corrupt=false,noUpdate=false,failPayloadOnce=false;
     UpdateHttp(){
         if(!server.listen(QHostAddress::LocalHost,0))qFatal("loopback fixture failed");
         connect(&server,&QTcpServer::newConnection,this,[this]{while(server.hasPendingConnections()){
@@ -50,6 +50,7 @@ class UpdateHttp final:public QObject {
                 socket->setProperty("handled",true);++requests;
                 if(status!=200){socket->write("HTTP/1.1 "+QByteArray::number(status)+" Limited\r\nRetry-After: 120\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");socket->disconnectFromHost();return;}
                 const auto path=request->split(' ').value(1);QByteArray body;bool metadata=path.endsWith("/latest");
+                if(!metadata&&failPayloadOnce){failPayloadOnce=false;socket->write("HTTP/1.1 503 Temporary\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");socket->disconnectFromHost();return;}
                 if(metadata){
                     QJsonObject asset{{"name","FrogShell-0.1.43-portable.exe"},{"size",package.size()},
                         {"browser_download_url","https://github.com/bunnya33/frog_shell/releases/download/v0.1.43/FrogShell-0.1.43-portable.exe"},
@@ -199,6 +200,19 @@ class MenuTests final:public QObject {
         action->trigger();QCOMPARE(manual.size(),1);auto dialog=window.findChild<QDialog *>("aboutFrogShellDialog");QVERIFY(dialog);QCOMPARE(network.logicalRequests,1);
         dialog->close();fixture.noUpdate=true;controller.check();QTRY_VERIFY_WITH_TIMEOUT(!controller.hasUpdate(),5000);QVERIFY(!action->isVisible());QCOMPARE(tray->icon().cacheKey(),baseKey);
     }
+    void downloadRetryStatusAndCancellation(){
+        UpdateHttp fixture;UpdateTransport network(fixture);UpdateController controller(runtime(),{},data->filePath("updates"),nullptr,&network);
+        controller.check();QTRY_COMPARE_WITH_TIMEOUT(controller.state(),releaseupdate::State::Available,5000);
+        fixture.failPayloadOnce=true;controller.download();
+        QTRY_VERIFY_WITH_TIMEOUT(controller.statusText().contains("重试"),3000);
+        QVERIFY(controller.progressText().contains("1/3"));QVERIFY(controller.updateBusy());
+        QTRY_VERIFY_WITH_TIMEOUT(controller.ready(),5000);QCOMPARE(network.logicalRequests,3);
+        // A new operation can also be canceled while waiting for backoff.
+        controller.check();QTRY_COMPARE_WITH_TIMEOUT(controller.state(),releaseupdate::State::Available,5000);
+        fixture.failPayloadOnce=true;controller.download();QTRY_VERIFY_WITH_TIMEOUT(controller.statusText().contains("重试"),3000);
+        const auto requests=network.logicalRequests;controller.cancel();QTest::qWait(1100);
+        QCOMPARE(network.logicalRequests,requests);QVERIFY(!controller.ready());QVERIFY(!controller.updateBusy());
+    }
     void downloadOutlivesViewAndManualReady(){
         UpdateHttp fixture;UpdateTransport network(fixture);UpdateController controller(runtime(),{},data->filePath("updates"),nullptr,&network);QWidget owner;owner.show();
         controller.check();QTRY_COMPARE_WITH_TIMEOUT(controller.state(),releaseupdate::State::Available,5000);fixture.slow=true;controller.download();QTRY_COMPARE_WITH_TIMEOUT(controller.state(),releaseupdate::State::Downloading,3000);
@@ -255,7 +269,7 @@ class MenuTests final:public QObject {
         QString receipt;connect(&controller,&UpdateController::restartRequested,this,[&]{receipt=QSettings().value("update/installReceipt").toString();});
         auto window=std::make_unique<MainWindow>(true,std::make_shared<UpdateSecrets>(),&controller);window->show();
         auto updateAction=window->findChild<QAction *>("trayUpdate");auto cancelAction=window->findChild<QAction *>("trayCancelUpdate");QVERIFY(updateAction&&cancelAction);QVERIFY(updateAction->isVisible());
-        auto workspace=window->workspaces.cbegin().value();auto editor=workspace->editors.cbegin().value();QVERIFY(editor);editor->code->appendPlainText("pending update draft");
+        auto workspace=window->workspaces.cbegin().value();auto editor=workspace->editors.cbegin().value();QVERIFY(editor);editor->code->moveCursor(QTextCursor::End);editor->code->insertPlainText("\npending update draft");
         if(mode=="save-fails")editor->code->setReadOnly(true);
         QSignalSpy aborted(window.get(),&MainWindow::exitAborted),completed(window.get(),&MainWindow::exitCompleted);
         bool saveSeen=false,approvedBeforeSave=false,completedBeforeSave=false;
@@ -264,7 +278,7 @@ class MenuTests final:public QObject {
         int prompts=0;QTimer driver;driver.setInterval(5);connect(&driver,&QTimer::timeout,this,[&]{
             if(auto box=qobject_cast<QMessageBox *>(QApplication::activeModalWidget())){
                 if(box->windowTitle()=="退出 FrogShell"){
-                    ++prompts;if(mode=="changed")editor->code->appendPlainText("changed during confirmation");
+                    ++prompts;if(mode=="changed"){editor->code->moveCursor(QTextCursor::End);editor->code->insertPlainText("\nchanged during confirmation");}
                     if(mode=="intent-cancel")controller.cancelExitIntent();
                     const auto choice=(mode=="cancel"||mode=="download-error"||mode=="download-cancel")?QMessageBox::Cancel:(mode=="changed"||mode=="intent-cancel")?QMessageBox::Discard:QMessageBox::Save;box->button(choice)->click();
                 }else box->accept();

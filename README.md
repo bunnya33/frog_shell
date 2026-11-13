@@ -2,7 +2,9 @@
 
 C++20 / Qt 6 Widgets 原生 SSH 工作区。按已确认的合并窗口原型实现，提供 Dracula 与 GitHub Light 两套主题。
 
-当前开发版本为 **0.1.46**。真实 SSH、PTY、SFTP 与本地 TCP 端口转发已接入；完成与验证状态见各版本验证记录，不将开发版视为全部功能已验收的发布版。
+当前开发版本为 **0.1.47**。真实 SSH、PTY、SFTP 与本地 TCP 端口转发已接入；完成与验证状态见各版本验证记录，不将开发版视为全部功能已验收的发布版。
+
+0.1.47 改善更新下载的停顿超时、自动重试和本次运行内断点续传，并正式包含已确认的 Scintilla 编辑器迁移。Windows 同时发布便携版和安装版。详见 [更新说明](docs/0.1.47-update.zh-CN.md) 和 [验证记录](docs/FrogShell-0.1.47验证记录.md)。
 
 0.1.46 在上方编辑区域关闭或移出最后一个页签后，自动最大化底部面板；重新打开文件或功能页签时还原。分屏中仍有页签时保留编辑区域，底部当前选中的终端、端口或服务页签保持不变。搜索清空或关闭后清理对应高亮和搜索生成的选区，保留手动选择、语法红线和高级搜索结果记录。详见 [更新说明](docs/0.1.46-update.zh-CN.md) 和 [验证记录](docs/FrogShell-0.1.46验证记录.md)。
 
@@ -124,7 +126,7 @@ Windows 使用 Credential Manager，macOS 使用 Keychain，Linux 使用可选�
 
 ## 构建
 
-依赖：CMake ≥ 3.24、C++20 编译器、Qt ≥ 6.8（Core/Gui/Widgets/Network/Test）、OpenSSL 3。libssh2 1.11.1 和 libvterm 0.3.3 由 CMake 下载并核对 SHA-256。Qt 动态链接，不使用 Qt WebEngine、Chromium、Monaco 或 WebView。
+依赖：CMake ≥ 3.24、C++20 编译器、Qt ≥ 6.8（Core/Gui/Widgets/Network/Test/Core5Compat；安装 Qt 时选择 `qt5compat`）、OpenSSL 3。libssh2 1.11.1、libvterm 0.3.3 和官方 Scintilla 5.5.7 由 CMake 下载并核对 SHA-256。编辑器采用 Scintilla 官方 Qt 接口；Core5Compat 用于该接口的字符编码支持。Qt 动态链接，不使用 Qt WebEngine、Chromium、Monaco 或 WebView。Scintilla 的字体适配补丁见 [变更说明](third_party/patches/scintilla-5.5.7.md)。
 
 Windows 使用 MSVC。此工作区已经在 `.tools/Qt` 安装了独立的 Qt 6.8.3 SDK 和 OpenSSL 开发包，不改变全局 PATH。
 

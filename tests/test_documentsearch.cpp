@@ -9,6 +9,7 @@ namespace rs {
 class DocumentSearchTests : public QObject {
     Q_OBJECT
     QTemporaryDir temporary;
+    std::unique_ptr<QTemporaryDir> caseData;
     QString report;
     Profile profile(const QString &id="search-a"){Profile p;p.id=id;p.name="staging-api";p.user="demo";p.host="192.0.2.21";return p;}
     QString sample() const {return "get gateway error 中文\nrelay internal 已连接\nGet Gateway Error 重试\nget gateway error; get gateway error\n";}
@@ -17,8 +18,8 @@ class DocumentSearchTests : public QObject {
     }
     void query(DocumentSearchController &controller,const QString &text){controller.parameters()->findChild<QLineEdit *>("advancedSearchQuery")->setText(text);controller.executeSearch();}
     void settle(){QCoreApplication::processEvents();QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);}
-    QList<QTextEdit::ExtraSelection> tokens(CodeEdit *code,const QColor &color=QColor("#f6d75d")){
-        QList<QTextEdit::ExtraSelection> found;for(const auto &s:code->extraSelections())if(s.format.background().color()==color)found.append(s);return found;
+    QList<EditorExtraSelection> tokens(CodeEdit *code,const QColor &color=QColor("#f6d75d")){
+        QList<EditorExtraSelection> found;for(const auto &s:code->extraSelections())if(s.format.background().color()==color)found.append(s);return found;
     }
   private slots:
     void initTestCase(){
@@ -29,6 +30,11 @@ class DocumentSearchTests : public QObject {
         QApplication::setStyle("Fusion");for(auto font:{"C:/Windows/Fonts/msyh.ttc","C:/Windows/Fonts/consola.ttf"})if(QFileInfo::exists(font))QFontDatabase::addApplicationFont(font);
         QApplication::setFont(QFont("Microsoft YaHei UI",10));QApplication::setWindowIcon(applicationIcon());applyTheme(false);
         report=qEnvironmentVariable("RABBITSHELL_TEST_REPORT_DIR",temporary.path());QDir().mkpath(report);
+    }
+    void init(){
+        // Theme/data rows must never recover an earlier fixture's autosaved draft.
+        caseData=std::make_unique<QTemporaryDir>(temporary.filePath("case-XXXXXX"));QVERIFY(caseData->isValid());
+        qputenv("RABBITSHELL_DATA_DIR",caseData->path().toUtf8());
     }
     void cleanup(){OperationGate::setLocked(false);settle();}
     void coreCountsUnicodeZeroWidthAndLimits(){
@@ -52,13 +58,13 @@ class DocumentSearchTests : public QObject {
         QCOMPARE(tokens(a->code).size(),4);QVERIFY(tokens(b->code).isEmpty());
         QCOMPARE(a->code->toPlainText(),text);QCOMPARE(a->dirty(),dirty);QCOMPARE(a->code->document()->isUndoAvailable(),undo);
         controller.activateResult(0);QCOMPARE(tokens(a->code,QColor("#eaa13b")).size(),1);QCOMPARE(tokens(a->code).size(),3);
-        QVERIFY(a->code->styleSheet().contains("selection-color"));controller.setDetached(true);controller.results()->view()->setFocus();settle();
+        QVERIFY(a->code->selectionBackground() == QColor("#eaa13b"));controller.setDetached(true);controller.results()->view()->setFocus();settle();
         QCOMPARE(tokens(a->code,QColor("#eaa13b")).size(),1);
         workspace->editArea->activatePage(b);QVERIFY(tokens(b->code).isEmpty());QCOMPARE(tokens(a->code).size(),3);
-        QTextCursor prefix(a->code->document());prefix.insertText("前置\n");
+        EditorCursor prefix(a->code->document());prefix.insertText("前置\n");
         QCOMPARE(tokens(a->code).size(),3);QCOMPARE(tokens(a->code,QColor("#eaa13b")).size(),1);
         QSignalSpy activated(&controller,&DocumentSearchController::resultActivated);controller.activateResult(0);QCOMPARE(activated.count(),1);QCOMPARE(a->code->textCursor().blockNumber(),1);
-        QTextCursor hit(a->code->document());hit.setPosition(a->code->document()->findBlockByNumber(1).position());hit.setPosition(hit.position()+2,QTextCursor::KeepAnchor);hit.insertText("改变");
+        EditorCursor hit(a->code->document());hit.setPosition(a->code->document()->findBlockByNumber(1).position());hit.setPosition(hit.position()+2,QTextCursor::KeepAnchor);hit.insertText("改变");
         QCOMPARE(tokens(a->code,QColor("#eaa13b")).size(),0);QCOMPARE(tokens(a->code).size(),3);controller.activateResult(0);QCOMPARE(activated.count(),1);
         QVERIFY(controller.openFor(workspace,b));query(controller,"修复");QTRY_COMPARE(done.count(),2);QVERIFY(done.last().first().toBool());
         QVERIFY(tokens(a->code).isEmpty());QCOMPARE(tokens(b->code).size(),2);
@@ -77,7 +83,7 @@ class DocumentSearchTests : public QObject {
         workspace->editors.remove(a->path);workspace->editArea->removePage(a);delete a;settle();
         auto reopened=add(*workspace,"/test/a.txt","changed");controller.activateResult(0);QVERIFY(tokens(reopened->code).isEmpty());
         reopened->code->setPlainText(text);controller.activateResult(0);QCOMPARE(tokens(reopened->code).size(),2);QCOMPARE(tokens(reopened->code,QColor("#eaa13b")).size(),1);
-        QTextCursor prefix(reopened->code->document());prefix.insertText("prefix\n");controller.activateResult(0);QCOMPARE(reopened->code->textCursor().blockNumber(),2);
+        EditorCursor prefix(reopened->code->document());prefix.insertText("prefix\n");controller.activateResult(0);QCOMPARE(reopened->code->textCursor().blockNumber(),2);
     }
     void navigationCentersAndCoexistsWithFindAndDiagnostics(){
         QMainWindow main;auto workspace=new Workspace(profile("center"),{},true);main.setCentralWidget(workspace);
@@ -132,7 +138,7 @@ class DocumentSearchTests : public QObject {
         workspace->closePage(controller.results());QVERIFY(tokens(editor->code).isEmpty());QVERIFY(!editor->code->textCursor().hasSelection());
         QCOMPARE(controller.results()->outcome().matchCount,4);QCOMPARE(controller.resultSource().path,editor->path);
         controller.showResults();controller.activateResult(0);QVERIFY(editor->code->textCursor().hasSelection());QVERIFY(!tokens(editor->code).isEmpty());
-        QTextCursor manual(editor->code->document());manual.setPosition(0);manual.setPosition(3,QTextCursor::KeepAnchor);editor->code->setTextCursor(manual);
+        EditorCursor manual(editor->code->document());manual.setPosition(0);manual.setPosition(3,QTextCursor::KeepAnchor);editor->code->setTextCursor(manual);
         controller.setDetached(true);controller.results()->window()->close();QCOMPARE(editor->code->textCursor(),manual);QVERIFY(tokens(editor->code).isEmpty());
         controller.showResults();controller.activateResult(0);QVERIFY(controller.openFor(workspace,editor));
         auto input=controller.parameters()->findChild<QLineEdit *>("advancedSearchQuery");input->clear();QVERIFY(tokens(editor->code).isEmpty());QVERIFY(!editor->code->textCursor().hasSelection());
@@ -158,9 +164,9 @@ class DocumentSearchTests : public QObject {
     void anchorsStaleAndReopenDoNotRestoreDiscardedDraft(){
         QMainWindow main;auto workspace=new Workspace(profile("anchors"),{},true);main.setCentralWidget(workspace);auto a=add(*workspace,"/test/a.txt",sample());DocumentSearchController controller(&main);controller.registerWorkspace(workspace);main.show();
         QVERIFY(controller.openFor(workspace,a));QSignalSpy done(&controller,&DocumentSearchController::searchFinished);query(controller,"get gateway error");QTRY_COMPARE(done.count(),1);
-        QTextCursor prefix(a->code->document());prefix.insertText("前置行\n");QSignalSpy activated(&controller,&DocumentSearchController::resultActivated);controller.activateResult(0);QCOMPARE(activated.count(),1);QCOMPARE(a->code->textCursor().blockNumber(),1);
-        QTextCursor edit(a->code->document()->findBlockByNumber(1));edit.select(QTextCursor::BlockUnderCursor);edit.insertText("changed");controller.activateResult(0);QCOMPARE(activated.count(),1);QVERIFY(controller.results()->findChild<QLabel *>("documentSearchResultFeedback")->text().contains("过期"));
-        workspace->editors.remove(a->path);workspace->editArea->removePage(a);delete a;settle();QVERIFY(controller.resultSource().editor.isNull());QVERIFY(controller.resultSource().document.isNull());
+        EditorCursor prefix(a->code->document());prefix.insertText("前置行\n");QSignalSpy activated(&controller,&DocumentSearchController::resultActivated);controller.activateResult(0);QCOMPARE(activated.count(),1);QCOMPARE(a->code->textCursor().blockNumber(),1);
+        EditorCursor edit(a->code->document()->findBlockByNumber(1));edit.select(QTextCursor::BlockUnderCursor);edit.insertText("changed");controller.activateResult(0);QCOMPARE(activated.count(),1);QVERIFY(controller.results()->findChild<QLabel *>("documentSearchResultFeedback")->text().contains("过期"));
+        a->discardDraft();workspace->editors.remove(a->path);workspace->editArea->removePage(a);delete a;settle();QVERIFY(controller.resultSource().editor.isNull());QVERIFY(controller.resultSource().document.isNull());
         auto reopened=add(*workspace,"/test/a.txt","different remote content");controller.activateResult(1);QCOMPARE(activated.count(),1);QCOMPARE(reopened->code->toPlainText(),QString("different remote content"));
         reopened->code->setPlainText(sample());controller.activateResult(1);QCOMPARE(activated.count(),2);QCOMPARE(reopened->code->textCursor().blockNumber(),2);
     }
@@ -207,11 +213,11 @@ class DocumentSearchTests : public QObject {
         QFETCH(bool,light);applyTheme(light);QMainWindow main;auto workspace=new Workspace(profile("visual-editor"),{},true);main.setCentralWidget(workspace);workspace->editArea->mergeAll();
         const QString wrapped="const message = \"修复："+QString("中文配置与状态检查 ").repeated(30)+"修复完成\";";
         auto a=add(*workspace,"/home/demo/config.js","// 搜索结果 修复\n"+wrapped+"\nconst 修复状态 = true; // 修复\n");
-        a->code->setLineWrapMode(QPlainTextEdit::WidgetWidth);DocumentSearchController controller(&main);controller.registerWorkspace(workspace);main.resize(900,680);main.show();
+        a->code->setLineWrapMode(EditorSurface::WidgetWidth);DocumentSearchController controller(&main);controller.registerWorkspace(workspace);main.resize(900,680);main.show();
         QVERIFY(controller.openFor(workspace,a));QSignalSpy done(&controller,&DocumentSearchController::searchFinished);query(controller,"修复");QTRY_COMPARE(done.count(),1);
         controller.parameters()->hide();controller.setDetached(true);controller.activateResult(1);controller.results()->view()->setFocus();settle();
-        const auto block=a->code->document()->findBlockByNumber(1);QVERIFY(block.layout()->lineCount()>=3);
-        QTextCursor start(block);const int top=a->code->cursorRect(start).top();const int height=a->code->fontMetrics().lineSpacing();
+        const auto block=a->code->document()->findBlockByNumber(1);QVERIFY(int(a->code->send(SCI_WRAPCOUNT, block.blockNumber()))>=3);
+        EditorCursor start(block);const int top=a->code->cursorRect(start).top();const int height=a->code->lineHeight();
         const auto shot=a->code->viewport()->grab().toImage();const QColor row(light?"#f0edf8":"#363447");
         for(int i=0;i<3;++i){const int y=top+i*height+height/2;QVERIFY(y>=0&&y<a->code->viewport()->height());const qreal dpr=shot.devicePixelRatio();QCOMPARE(shot.pixelColor(qRound((a->code->viewport()->width()-8)*dpr),qRound(y*dpr)),row);}
         QCOMPARE(tokens(a->code,QColor("#eaa13b")).size(),1);QVERIFY(tokens(a->code).size()>=3);
