@@ -112,6 +112,7 @@ class Workspace : public QWidget {
     bool isConnected() const {
         return online;
     }
+    bool isConnecting() const { return mainPending; }
     bool hasMainConnection() const { return online || mainPending || (session && session->isRunning()); }
     bool dirty() const;
     int dirtyFileCount() const;

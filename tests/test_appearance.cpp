@@ -5,6 +5,7 @@
 #include "../src/ui/theme.h"
 #include "../src/ui/fontsettings.h"
 #include "../src/ui/mainwindow.h"
+#include "../src/ui/connectiondelegate.h"
 #include "../src/ui/applock.h"
 #include "../src/ui/services.h"
 #include "../src/ui/icons.h"
@@ -249,6 +250,41 @@ class AppearanceTests : public QObject {
             if(level==0)QVERIFY(window.grab().save(report+"/main-top-"+tag+".png"));
             for(auto e:w->editors)e->discardDraft();
         }
+    }
+    void connectionEnvironmentBadges_data(){ansiAndDefaultEnhancement_data();}
+    void connectionEnvironmentBadges(){
+        QFETCH(bool,light);applyTheme(light);
+        MainWindow window(true,std::make_shared<FontMemorySecrets>());window.resize(1440,900);window.show();settle();
+        auto workspace=window.workspaces.begin().value();QVERIFY(!workspace->session);
+        window.profiles={workspace->profile};window.profiles[0].name="测试服务器";window.profiles[0].environment="测试";
+        for(const auto &environment:QStringList{"生产","个人","自定义环境"}){
+            Profile profile;profile.name=environment+"服务器";profile.host="192.0.2.31";profile.user="deploy";profile.environment=environment;window.profiles<<profile;
+        }
+        workspace->online=true;window.refresh();window.tabs->setCurrentIndex(0);settle();
+        auto current=window.connections->topLevelItem(0);QCOMPARE(current->text(4),QString("已连接"));
+        QCOMPARE(current->data(4,ConnectionStateRole).toInt(),int(ConnectionState::Connected));
+        window.connections->setCurrentItem(window.connections->topLevelItem(1));
+        current->setSelected(true); // Exercise connected/pending colors on selection too.
+        for(int level:{0,2}){
+            UiZoom::instance().setLevel(level);settle();
+            window.connections->horizontalScrollBar()->setValue(window.connections->horizontalScrollBar()->maximum());settle();
+            const auto suffix=QString("%1-z%2").arg(light?"light":"dark").arg(level);
+            QVERIFY(window.grab().save(report+"/connection-badges-"+suffix+".png"));
+            QVERIFY(window.connections->grab().save(report+"/connection-badges-list-"+suffix+".png"));
+            workspace->online=false;workspace->mainPending=true;window.refresh();settle();
+            QCOMPARE(current,window.connections->topLevelItem(0));QCOMPARE(current->text(4),QString("连接中"));
+            QCOMPARE(current->data(4,ConnectionStateRole).toInt(),int(ConnectionState::Connecting));
+            QVERIFY(window.connections->topLevelItem(1)->isSelected());
+            QVERIFY(window.connections->grab().save(report+"/connection-badges-pending-"+suffix+".png"));
+            workspace->mainPending=false;window.refresh();settle();QCOMPARE(current->text(4),QString("未连接"));
+            QCOMPARE(current->data(4,ConnectionStateRole).toInt(),int(ConnectionState::Disconnected));
+            QVERIFY(current->toolTip(4).contains("SSH 未连接"));
+            workspace->online=true;window.refresh();
+        }
+        window.connections->setColumnWidth(3,uiPx(44));window.connections->setColumnWidth(4,uiPx(56));
+        window.connections->horizontalScrollBar()->setValue(window.connections->horizontalScrollBar()->maximum());settle();
+        QVERIFY(window.connections->grab().save(report+QString("/connection-badges-narrow-%1.png").arg(light?"light":"dark")));
+        workspace->online=false;
     }
     void redesignProductionEvidence_data(){ansiAndDefaultEnhancement_data();}
     void redesignProductionEvidence(){

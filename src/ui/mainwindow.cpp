@@ -10,6 +10,7 @@
 #include "fileicons.h"
 #include "filecontextmenu.h"
 #include "layoutmetrics.h"
+#include "connectiondelegate.h"
 #include "documentsearch.h"
 #include "../core/diagnostics.h"
 #include "../core/storage.h"
@@ -196,13 +197,14 @@ MainWindow::MainWindow(bool demonstration, std::shared_ptr<SecretBackend> backen
     cl->addLayout(actions);
     connections = new SafeTreeWidget;
     connections->setColumnCount(5);connections->setHeaderLabels({"名称", "地址", "用户", "环境", "状态"});
+    connections->headerItem()->setTextAlignment(3,Qt::AlignCenter);
     connections->setEditTriggers(QAbstractItemView::NoEditTriggers);
     connections->setSelectionBehavior(QAbstractItemView::SelectRows);connections->setSelectionMode(QAbstractItemView::ExtendedSelection);
     connections->setUniformRowHeights(true);connections->setAllColumnsShowFocus(true);
     connections->header()->setStretchLastSection(false);connections->header()->setSectionResizeMode(QHeaderView::Interactive);
     UiZoom::instance().bind(connections,"columns",[this]{scalingColumns=true;for(int c=0;c<5;++c)connections->setColumnWidth(c,uiPx(connectionColumns[c]));scalingColumns=false;if(!customConnectionColumns)fitConnectionColumns();});
     connect(connections->header(),&QHeaderView::sectionResized,this,[this](int c,int,int size){if(!scalingColumns&&!UiZoom::instance().changing()){connectionColumns[c]=uiBase(size);customConnectionColumns=true;}});
-    connections->setItemDelegate(new DensityDelegate(46,connections,28));
+    connections->setItemDelegate(new ConnectionDelegate(connections));
     connections->setProperty("connectionList",true);
     UiZoom::instance().bind(connections,"rowHeight",[this]{for(QTreeWidgetItemIterator it(connections);*it;++it)(*it)->setSizeHint(0,QSize(0,uiPx((*it)->parent()?28:46)));connections->setIndentation(uiPx(18));});
     connections->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -361,9 +363,15 @@ void MainWindow::refresh() {
         const int previous=connections->indexOfTopLevelItem(item);
         if(previous!=row){viewChanged=true;if(previous>=0)connections->takeTopLevelItem(previous);connections->insertTopLevelItem(row,item);}++row;
         const auto w=workspaces.value(p.id);
-        const QStringList values={p.name,p.host+(p.port==22?"":":"+QString::number(p.port)),p.user,p.environment,w?(w->isConnected()?"已连接":"工作区已打开"):"未连接"};
+        const auto state = w && w->isConnected() ? ConnectionState::Connected
+                         : w && w->isConnecting() ? ConnectionState::Connecting : ConnectionState::Disconnected;
+        const auto status = state == ConnectionState::Connected ? QStringLiteral("已连接")
+                          : state == ConnectionState::Connecting ? QStringLiteral("连接中") : QStringLiteral("未连接");
+        const QStringList values={p.name,p.host+(p.port==22?"":":"+QString::number(p.port)),p.user,p.environment,status};
         item->setData(0,Qt::UserRole,p.id);item->setSizeHint(0,QSize(0,uiPx(46)));
         for(int c=0;c<5;++c){item->setText(c,values[c]);item->setToolTip(c,Qt::convertFromPlainText(values[c]));}
+        item->setData(4,ConnectionStateRole,int(state));
+        if(w && state==ConnectionState::Disconnected)item->setToolTip(4,"工作区已打开，SSH 未连接");
         const auto q=search->text().trimmed();
         const bool visible=(q.isEmpty()||(p.name+" "+p.host+" "+p.user+" "+p.group).contains(q,Qt::CaseInsensitive))&&
             (filter!="收藏"||p.favorite)&&(filter!="最近使用"||p.lastUsed.isValid())&&
