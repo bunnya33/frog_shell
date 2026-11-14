@@ -183,6 +183,71 @@ class EditorHighlightTests : public QObject {
         QCOMPARE(edit.toPlainText(), original);
         QCOMPARE(edit.document()->isModified(), modified);
     }
+    void editingWithFindOpenPreservesCaretAndSelection() {
+        CodeEdit edit; edit.resize(700,300);
+        edit.setPlainText("needle first\nedit here\nneedle last\n");
+        edit.show(); edit.activateWindow(); edit.showFind();
+        auto query=edit.findChild<QLineEdit *>("findQuery");
+        auto status=edit.findChild<QLabel *>("findStatus");
+        query->setText("needle"); QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(" / 2"),5000);
+        QCOMPARE(edit.textCursor().selectedText(),QString("needle"));
+        edit.setFocus(); placeOnLine(edit,1); edit.moveCursor(QTextCursor::EndOfBlock);
+        QTest::keyClicks(&edit,"!"); const auto caret=edit.textCursor().position();
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        QCOMPARE(edit.textCursor().position(),caret); QVERIFY(!edit.textCursor().hasSelection());
+        QTest::keyClicks(&edit," next");
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        QCOMPARE(edit.toPlainText(),QString("needle first\nedit here! next\nneedle last\n"));
+        // Keep a user's range selected even if a debounced search finishes later.
+        QTest::keyClicks(&edit,"!");
+        QTest::keyClick(&edit,Qt::Key_Left,Qt::ShiftModifier);
+        const auto manual=edit.textCursor();
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        QCOMPARE(edit.textCursor(),manual); QCOMPARE(edit.textCursor().selectedText(),QString("!"));
+        // Editing a selected search hit must not select another hit afterwards.
+        edit.showFind(); QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        QCOMPARE(edit.textCursor().selectedText(),QString("needle"));
+        edit.setFocus(); QTest::keyClicks(&edit,"changed");
+        const auto replaced=edit.textCursor().position();
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        QCOMPARE(edit.textCursor().position(),replaced); QVERIFY(!edit.textCursor().hasSelection());
+        QTest::keyClicks(&edit," again");
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        QVERIFY(edit.toPlainText().contains("changed again"));
+        QVERIFY(edit.toPlainText().contains("needle first"));
+        // Explicit navigation continues to select matches normally.
+        query->setFocus(); QTest::keyClick(query,Qt::Key_Return);
+        QTRY_COMPARE(edit.textCursor().selectedText(),QString("needle"));
+    }
+    void movingCaretWhileSearchIsPendingCancelsAutomaticNavigation() {
+        CodeEdit edit; edit.resize(700,300); edit.setPlainText("needle\nmanual selection\nneedle\n"); edit.show(); edit.showFind();
+        auto query=edit.findChild<QLineEdit *>("findQuery"); query->setText("needle");
+        edit.setFocus(); placeOnLine(edit,1); QTest::keyClick(&edit,Qt::Key_Right,Qt::ShiftModifier);
+        const auto manual=edit.textCursor();
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        QCOMPARE(edit.textCursor(),manual);
+    }
+    void passiveFindRefreshForEditorOperations_data() {
+        QTest::addColumn<QString>("operation");
+        for(const auto *name:{"paste","delete","undo","redo","ime"})QTest::newRow(name)<<QString(name);
+    }
+    void passiveFindRefreshForEditorOperations() {
+        QFETCH(QString,operation);
+        CodeEdit edit;edit.resize(700,300);edit.setPlainText("needle\nedit here\nneedle\n");edit.show();edit.activateWindow();edit.showFind();
+        auto query=edit.findChild<QLineEdit *>("findQuery");auto status=edit.findChild<QLabel *>("findStatus");
+        query->setText("needle");QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(" / 2"),5000);
+        edit.setFocus();placeOnLine(edit,1);edit.moveCursor(QTextCursor::EndOfBlock);
+        if(operation=="paste")edit.insertPlainText(" pasted\nnew line");
+        else if(operation=="delete")QTest::keyClick(&edit,Qt::Key_Backspace);
+        else if(operation=="ime") {QInputMethodEvent commit;commit.setCommitString(QString::fromUtf8("中文😀"));QApplication::sendEvent(&edit,&commit);}
+        else {edit.insertPlainText(" draft");edit.undo();if(operation=="redo")edit.redo();}
+        const auto caret=edit.textCursor();const int scroll=edit.verticalScrollBar()->value();
+        const auto changed=edit.toPlainText();
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        QCOMPARE(edit.textCursor(),caret);QVERIFY(!edit.textCursor().hasSelection());
+        QCOMPARE(edit.verticalScrollBar()->value(),scroll);QCOMPARE(edit.toPlainText(),changed);
+        QCOMPARE(edit.matches.size(),2);
+    }
     void closingFindPreservesManualSelectionAndRejectsStaleResults() {
         CodeEdit edit; edit.setPlainText(QString(150000,'x')+" needle end"); edit.resize(700,300); edit.show();
         edit.showFind(); auto query=edit.findChild<QLineEdit *>("findQuery"); auto status=edit.findChild<QLabel *>("findStatus");

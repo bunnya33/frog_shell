@@ -37,6 +37,32 @@ QString chineseError(const releaseupdate::Error &error) {
 QLabel *plainLabel(const QString &text,QWidget *parent=nullptr) {
     auto label=new QLabel(text,parent);label->setTextFormat(Qt::PlainText);label->setWordWrap(true);return label;
 }
+class ReleasePageLink final : public QLabel {
+    void refreshLink() {
+        const auto color=isEnabled()?colors().link:colors().muted;
+        const auto value=QStringLiteral("手动下载：<a style=\"color:%1\" href=\"https://github.com/bunnya33/frog_shell/releases\">https://github.com/bunnya33/frog_shell/releases</a>").arg(color.name());
+        if(text()!=value)setText(value);
+    }
+  public:
+    ReleasePageLink(){refreshLink();}
+  protected:
+    void changeEvent(QEvent *event) override {
+        QLabel::changeEvent(event);
+        // QLabel can retain the rich-text link brush from its first layout.
+        if(event->type()==QEvent::PaletteChange||event->type()==QEvent::ApplicationPaletteChange||
+           event->type()==QEvent::StyleChange||event->type()==QEvent::EnabledChange)refreshLink();
+    }
+};
+QLabel *manualReleaseLink(const QString &name) {
+    auto label=new ReleasePageLink;
+    label->setObjectName(name);label->setTextFormat(Qt::RichText);label->setWordWrap(true);
+    label->setTextInteractionFlags(Qt::TextBrowserInteraction);label->setOpenExternalLinks(false);
+    label->setToolTip("打开 GitHub 发布页，手动选择便携版或安装版");
+    QObject::connect(label,&QLabel::linkActivated,label,[]{
+        if(!OperationGate::locked())QDesktopServices::openUrl(QUrl("https://github.com/bunnya33/frog_shell/releases"));
+    });
+    return label;
+}
 QString bytes(qint64 n) {
     return n>=1024*1024?QString::number(n/double(1024*1024),'f',1)+" MiB":QString::number(n/1024.0,'f',0)+" KiB";
 }
@@ -288,12 +314,13 @@ QWidget *UpdateController::createSettingsPage(QWidget *parent) {
     auto title=plainLabel("更新");title->setProperty("heading",true);layout->addWidget(title);
     auto card=new QWidget;setFrameRole(card,"card");auto form=new QVBoxLayout(card);uiMargins(form,16,16,16,16);uiSpacing(form,10);layout->addWidget(card);
     form->addWidget(plainLabel("更新源：github.com/bunnya33/frog_shell"));
+    auto manualLink=manualReleaseLink("updateSettingsReleasePage");form->addWidget(manualLink);
     auto automatic=new QCheckBox("启动时及每 30 分钟自动检查更新");automatic->setObjectName("updateAutomaticCheck");automatic->setChecked(QSettings().value("update/automaticCheckEnabled",true).toBool());form->addWidget(automatic);
     auto note=plainLabel("默认开启；发现更新后由你选择是否安装。服务限流或更新任务进行时会延后检查。");note->setProperty("muted",true);form->addWidget(note);
     auto feedback=plainLabel({});feedback->setObjectName("updateSettingsStatus");form->addWidget(feedback);
     auto save=button("保存更新设置");save->setObjectName("saveUpdateSettings");form->addWidget(save,0,Qt::AlignLeft);
     connect(save,&QPushButton::clicked,page,[=,this]{QString error;if(setAutomaticCheckEnabled(automatic->isChecked(),&error))feedback->setText("更新设置已保存。");else feedback->setText(error);});
-    auto sync=[=,this]{const bool enabled=!restartPending()&&!OperationGate::locked();automatic->setEnabled(enabled);save->setEnabled(enabled);};
+    auto sync=[=,this]{const bool enabled=!restartPending()&&!OperationGate::locked();automatic->setEnabled(enabled);save->setEnabled(enabled);manualLink->setEnabled(enabled);};
     connect(this,&UpdateController::changed,page,sync);sync();layout->addStretch();return page;
 }
 void UpdateController::showAbout(QWidget *parent) {
@@ -310,23 +337,24 @@ void UpdateController::showAbout(QWidget *parent) {
     auto card=new QWidget;setFrameRole(card,"card");auto box=new QVBoxLayout(card);uiMargins(box,14,14,14,14);uiSpacing(box,10);layout->addWidget(card);
     auto source=plainLabel({});source->setObjectName("aboutUpdateSource");auto sourceRow=new QHBoxLayout;sourceRow->addWidget(source,1);auto settingsButton=button("更新设置…");settingsButton->setObjectName("aboutUpdateSettings");sourceRow->addWidget(settingsButton);box->addLayout(sourceRow);
     auto status=plainLabel({});status->setObjectName("aboutUpdateStatus");bindUiFont(status,13,QFont::Medium);box->addWidget(status);
+    auto manualLink=manualReleaseLink("aboutManualUpdateLink");box->addWidget(manualLink);
     auto hint=plainLabel(d->installHint());hint->setProperty("muted",true);box->addWidget(hint);
     auto lastInstall=plainLabel({});lastInstall->setObjectName("aboutInstallStatus");box->addWidget(lastInstall);
     auto progress=new QProgressBar;progress->setObjectName("aboutUpdateProgress");box->addWidget(progress);
     auto progressText=plainLabel({});progressText->setObjectName("aboutUpdateProgressText");progressText->setProperty("muted",true);box->addWidget(progressText);
     auto notes=new QPlainTextEdit;notes->setObjectName("aboutReleaseNotes");notes->setReadOnly(true);notes->setPlaceholderText("检查到新版本后，在这里显示发布说明。");notes->setMinimumHeight(uiPx(100));notes->setMaximumHeight(uiPx(220));layout->addWidget(notes,1);
     auto footer=new PanelBand(52,true,dialog);footer->setObjectName("aboutFooter");auto actions=new QHBoxLayout(footer);uiMargins(actions,16,8,16,8);uiSpacing(actions,8);outer->addWidget(footer);
-    auto checkButton=button("检查更新"),downloadButton=button("下载更新"),cancelButton=button("取消"),restartButton=button("重启更新"),releaseButton=button("发布页"),folderButton=button("下载位置"),closeButton=button("关闭");
-    checkButton->setObjectName("aboutCheckUpdate");downloadButton->setObjectName("aboutDownloadUpdate");cancelButton->setObjectName("aboutCancelUpdate");restartButton->setObjectName("aboutRestartUpdate");releaseButton->setObjectName("aboutReleasePage");closeButton->setObjectName("aboutClose");restartButton->setProperty("primary",true);
+    auto checkButton=button("检查更新"),downloadButton=button("下载更新"),cancelButton=button("取消"),restartButton=button("重启更新"),folderButton=button("下载位置"),closeButton=button("关闭");
+    checkButton->setObjectName("aboutCheckUpdate");downloadButton->setObjectName("aboutDownloadUpdate");cancelButton->setObjectName("aboutCancelUpdate");restartButton->setObjectName("aboutRestartUpdate");closeButton->setObjectName("aboutClose");restartButton->setProperty("primary",true);
     folderButton->setObjectName("aboutDownloadLocation");
-    for(auto button:{checkButton,downloadButton,cancelButton,restartButton,releaseButton,folderButton}){stylePromptButton(button);actions->addWidget(button);}
+    for(auto button:{checkButton,downloadButton,cancelButton,restartButton,folderButton}){stylePromptButton(button);actions->addWidget(button);}
     stylePromptButton(closeButton);actions->addStretch();actions->addWidget(closeButton);
     auto sync=[=,this]{
         const auto config=configuration();source->setText(config.owner.isEmpty()?"更新源：未配置":"GitHub · "+config.owner+" / "+config.repository);status->setText(d->status);
         const bool busy=d->client->busy()||d->preparing;const bool gate=!OperationGate::locked();
         checkButton->setEnabled(gate&&!busy&&!d->restarting);downloadButton->setVisible((state()==S::Available||d->client->canResumeDownload())&&!ready());downloadButton->setText(d->client->canResumeDownload()?"重试下载":"下载更新");downloadButton->setEnabled(gate&&!busy);
         cancelButton->setVisible(busy||d->restarting||d->client->canResumeDownload());cancelButton->setEnabled(gate);restartButton->setVisible(ready()&&d->automaticInstall());restartButton->setEnabled(gate&&!busy&&!d->restarting&&!d->migrating);
-        releaseButton->setVisible(d->client->release().releaseUrl.isValid());releaseButton->setEnabled(gate&&!d->restarting);
+        manualLink->setEnabled(gate&&!d->restarting);
         folderButton->setVisible(ready()&&!d->automaticInstall());folderButton->setEnabled(gate);
         progress->setVisible(state()==S::Downloading||d->preparing);progressText->setVisible(state()==S::Downloading);
         if(d->total>0){progress->setRange(0,1000);progress->setValue(int(qMin<qint64>(1000,d->received*1000/d->total)));}else progress->setRange(0,0);
@@ -337,7 +365,6 @@ void UpdateController::showAbout(QWidget *parent) {
     };
     connect(this,&UpdateController::changed,dialog,sync);connect(this,&UpdateController::sourceChanged,dialog,sync);
     connect(checkButton,&QPushButton::clicked,this,[this]{check();});connect(downloadButton,&QPushButton::clicked,this,&UpdateController::download);connect(cancelButton,&QPushButton::clicked,this,&UpdateController::cancel);connect(restartButton,&QPushButton::clicked,this,&UpdateController::requestRestart);
-    connect(releaseButton,&QPushButton::clicked,dialog,[this]{if(OperationGate::locked())return;const auto release=d->client->release();const auto config=configuration();const auto url=release.releaseUrl;const auto prefix="/"+config.owner+"/"+config.repository+"/releases";if(url.scheme()=="https"&&url.host()=="github.com"&&url.userInfo().isEmpty()&&url.port(-1)==-1&&url.path().startsWith(prefix,Qt::CaseInsensitive))QDesktopServices::openUrl(url);});
     connect(closeButton,&QPushButton::clicked,dialog,&QDialog::close);sync();dialog->resize(uiSize(610,440));keepWindowOnScreen(dialog);dialog->show();
     connect(folderButton,&QPushButton::clicked,dialog,[this]{if(!OperationGate::locked()&&ready())QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(d->verified.path).absolutePath()));});
     connect(settingsButton,&QPushButton::clicked,dialog,[this,dialog]{if(OperationGate::locked())return;dialog->hide();emit settingsRequested();});

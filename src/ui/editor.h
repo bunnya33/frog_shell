@@ -55,6 +55,8 @@ class CodeEdit : public EditorSurface {
     QVector<Match> matches;
     quint64 findRevision = 0;
     bool findRunning = false;
+    enum class FindNavigation { None, Forward, Backward };
+    FindNavigation pendingFindNavigation = FindNavigation::None;
     QTimer *findTimer = nullptr;
     int currentMatch = -1;
     bool searchSelection = false;
@@ -76,7 +78,7 @@ class CodeEdit : public EditorSurface {
     void updateGutter();
     void locate(bool backwards = false);
     void ensureFindPanel();
-    void scheduleFind();
+    void scheduleFind(bool navigate = true);
     void updateMatches();
     void paintMatches();
     void updateHighlights();

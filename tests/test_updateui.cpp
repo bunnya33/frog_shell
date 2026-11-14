@@ -76,6 +76,13 @@ class UpdateTransport final:public QNetworkAccessManager {
         ++logicalRequests;logicalUrls.append(request.url());auto local=request;auto url=request.url();url.setScheme("http");url.setHost("127.0.0.1");url.setPort(fixture.server.serverPort());local.setUrl(url);return QNetworkAccessManager::createRequest(op,local,body);
     }
 };
+class UrlCapture final:public QObject {
+    Q_OBJECT
+  public:
+    QList<QUrl> urls;
+  public slots:
+    void open(const QUrl &url){urls.append(url);}
+};
 class MenuTests final:public QObject {
     Q_OBJECT
     QTemporaryDir root;std::unique_ptr<QTemporaryDir> data;QString report;
@@ -199,6 +206,30 @@ class MenuTests final:public QObject {
         QVERIFY(tray->toolTip().contains("0.1.43"));QVERIFY(tray->icon().cacheKey()!=baseKey);QSignalSpy manual(&controller,&UpdateController::manualUpdateRequested);
         action->trigger();QCOMPARE(manual.size(),1);auto dialog=window.findChild<QDialog *>("aboutFrogShellDialog");QVERIFY(dialog);QCOMPARE(network.logicalRequests,1);
         dialog->close();fixture.noUpdate=true;controller.check();QTRY_VERIFY_WITH_TIMEOUT(!controller.hasUpdate(),5000);QVERIFY(!action->isVisible());QCOMPARE(tray->icon().cacheKey(),baseKey);
+    }
+    void manualReleaseLinkWorksBeforeCheckAndAfterFailure(){
+        UrlCapture capture;QDesktopServices::setUrlHandler("https",&capture,"open");
+        auto reset=qScopeGuard([]{QDesktopServices::unsetUrlHandler("https");});
+        UpdateHttp fixture;fixture.status=503;UpdateTransport network(fixture);
+        UpdateController controller(runtime(),{},data->filePath("updates"),nullptr,&network);
+        QWidget owner;owner.show();auto dialog=about(controller,owner);
+        auto link=dialog->findChild<QLabel *>("aboutManualUpdateLink");QVERIFY(link);QVERIFY(link->isVisible());QVERIFY(link->isEnabled());
+        const QUrl release("https://github.com/bunnya33/frog_shell/releases");
+        QVERIFY(link->text().contains(release.toString()));
+        QVERIFY(QMetaObject::invokeMethod(link,"linkActivated",Q_ARG(QString,release.toString())));
+        QCOMPARE(capture.urls,QList<QUrl>{release});QCOMPARE(network.logicalRequests,0);
+        controller.check();QTRY_COMPARE_WITH_TIMEOUT(controller.state(),releaseupdate::State::Failed,5000);
+        QVERIFY(link->isVisible());QVERIFY(link->isEnabled());
+        QVERIFY(QMetaObject::invokeMethod(link,"linkActivated",Q_ARG(QString,release.toString())));
+        QCOMPARE(capture.urls,QList<QUrl>({release,release}));
+        std::unique_ptr<QWidget> settings(controller.createSettingsPage());
+        auto settingsLink=settings->findChild<QLabel *>("updateSettingsReleasePage");QVERIFY(settingsLink);
+        QVERIFY(QMetaObject::invokeMethod(settingsLink,"linkActivated",Q_ARG(QString,release.toString())));
+        QCOMPARE(capture.urls.size(),3);
+        for(bool light:{false,true}){applyTheme(light);QCoreApplication::processEvents();QVERIFY(dialog->grab().save(report+QString("/about-manual-offline-%1.png").arg(light?"light":"dark")));}
+        OperationGate::setLocked(true);
+        QVERIFY(QMetaObject::invokeMethod(link,"linkActivated",Q_ARG(QString,release.toString())));
+        QCOMPARE(capture.urls.size(),3);
     }
     void downloadRetryStatusAndCancellation(){
         UpdateHttp fixture;UpdateTransport network(fixture);UpdateController controller(runtime(),{},data->filePath("updates"),nullptr,&network);

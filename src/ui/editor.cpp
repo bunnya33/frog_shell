@@ -41,6 +41,7 @@ CodeEdit::CodeEdit(QWidget *p) : EditorSurface(p) {
     updateGutter();
     auto cursorChanged = [this] {
         if (locatingMatch) return;
+        pendingFindNavigation = FindNavigation::None;
         selectionOwner = SelectionOwner::None;
         ownedSelection = {};
         if (searchSelection) {
@@ -119,7 +120,7 @@ void CodeEdit::ensureFindPanel() {
     connect(prev, &QToolButton::clicked, this, [this] { locate(true); });
     connect(query, &QLineEdit::returnPressed, this, [this] { locate(); });
     connect(query, &QLineEdit::textChanged, this, [this] { scheduleFind(); });
-    connect(document(),&EditorDocument::contentsChanged,this,[this]{if(findPanel->isVisible())scheduleFind();});
+    connect(document(),&EditorDocument::contentsChanged,this,[this]{if(findPanel->isVisible())scheduleFind(false);});
     connect(one,&QToolButton::clicked,this,[this]{replaceMatches(false);});
     connect(all,&QToolButton::clicked,this,[this]{replaceMatches(true);});
     for(auto pair:QList<QPair<int,QToolButton *>>{{Qt::Key_C,findCase},{Qt::Key_W,findWord},{Qt::Key_R,findRegex}}){auto shortcut=new QShortcut(QKeySequence(Qt::ALT|pair.first),findPanel);connect(shortcut,&QShortcut::activated,pair.second,&QToolButton::toggle);}
@@ -219,13 +220,32 @@ void CodeEdit::closeFind() {
     if (findPanel) findPanel->hide();
     if (findTimer) findTimer->stop();
     ++findRevision;
+    pendingFindNavigation = FindNavigation::None;
     clearOwnedSelection(SelectionOwner::Find);
     currentMatch = -1;
     matches.clear();
     searchSelection = false;
     updateHighlights();
 }
-void CodeEdit::scheduleFind(){++findRevision;clearOwnedSelection(SelectionOwner::Find);currentMatch=-1;matches.clear();searchSelection=false;updateHighlights();if(query&&query->text().isEmpty()){if(findTimer)findTimer->stop();if(findStatus)findStatus->clear();return;}if(findTimer)findTimer->start();}
+void CodeEdit::scheduleFind(bool navigate) {
+    ++findRevision;
+    // Content changes only invalidate decorations. Never alter the native
+    // selection from a modification notification (typing, paste, undo or IME).
+    if (navigate) clearOwnedSelection(SelectionOwner::Find);
+    else if (selectionOwner == SelectionOwner::Find) {
+        selectionOwner = SelectionOwner::None; ownedSelection = {};
+    }
+    currentMatch = -1; matches.clear(); searchSelection = false;
+    pendingFindNavigation = navigate ? FindNavigation::Forward : FindNavigation::None;
+    updateHighlights();
+    if (query && query->text().isEmpty()) {
+        pendingFindNavigation = FindNavigation::None;
+        if (findTimer) findTimer->stop();
+        if (findStatus) findStatus->clear();
+        return;
+    }
+    if (findTimer) findTimer->start();
+}
 void CodeEdit::clearOwnedSelection(SelectionOwner owner) {
     if (selectionOwner != owner) return;
     const auto current = textCursor();
@@ -266,7 +286,17 @@ void CodeEdit::updateMatches(){
         matches=std::move(result->matches);currentMatch=-1;
         if(!result->error.isEmpty()){findStatus->setText(result->error);return;}
         if(matches.isEmpty()){findStatus->setText("无结果");return;}
-        locate();
+        const auto navigation = pendingFindNavigation;
+        pendingFindNavigation = FindNavigation::None;
+        if (navigation != FindNavigation::None) locate(navigation == FindNavigation::Backward);
+        else {
+            // Refresh the counter/highlights at the live caret without selecting
+            // text or scrolling. The user may have moved since the worker began.
+            currentMatch = 0;
+            const int position = textCursor().selectionStart();
+            for (int i=0;i<matches.size();++i) if (matches[i].start>=position) { currentMatch=i; break; }
+            paintMatches();
+        }
     });
     connect(worker,&QThread::finished,worker,&QObject::deleteLater);worker->start();
 }
@@ -479,7 +509,12 @@ void CodeEdit::showFind(bool replace) {
     scheduleFind();
 }
 void CodeEdit::locate(bool back) {
+    if (findRunning || (findTimer && findTimer->isActive())) {
+        if (query && !query->text().isEmpty()) pendingFindNavigation = back ? FindNavigation::Backward : FindNavigation::Forward;
+        return;
+    }
     if(matches.isEmpty())return;
+    if (!searchSelection) currentMatch = -1;
     if(currentMatch<0){const int position=textCursor().selectionStart();currentMatch=0;
         if(back){currentMatch=matches.size()-1;for(int i=matches.size()-1;i>=0;--i)if(matches[i].end<=position){currentMatch=i;break;}}
         else for(int i=0;i<matches.size();++i)if(matches[i].start>=position){currentMatch=i;break;}

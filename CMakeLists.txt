@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(RabbitShell VERSION 0.1.48 LANGUAGES C CXX)
+project(RabbitShell VERSION 0.1.49 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -410,6 +410,9 @@ if(RABBITSHELL_BUILD_TESTS)
     -DTEST_REPORT=${CMAKE_CURRENT_BINARY_DIR}/sshtrust-$<CONFIG>.txt
     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_qtest.cmake)
   set_tests_properties(sshtrust PROPERTIES SKIP_REGULAR_EXPRESSION "Set RABBITSHELL_TUNNEL_FIXTURE")
+  qt_add_executable(frogshell_update_probe tests/probe_release_download.cpp)
+  set_target_properties(frogshell_update_probe PROPERTIES WIN32_EXECUTABLE FALSE)
+  target_link_libraries(frogshell_update_probe PRIVATE rabbitshell_core Qt6::Network)
   add_custom_target(frogshell_editor_verification DEPENDS RabbitShell frogshell_selection_probe
     frogshell_editor_engine_tests rabbitshell_editor_highlights_tests rabbitshell_search_tests
     rabbitshell_syntaxdiagnostic_tests rabbitshell_appearance_tests rabbitshell_editorarea_tests

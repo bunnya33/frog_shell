@@ -1,4 +1,5 @@
 #include "releaseupdate.h"
+#include "diagnostics.h"
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFileInfo>
@@ -16,6 +17,8 @@
 #include <QThread>
 #include <QTimer>
 #include <QTimeZone>
+#include <QUrlQuery>
+#include <QUuid>
 #include <cmath>
 
 namespace rs::releaseupdate {
@@ -144,12 +147,13 @@ struct Client::Impl {
     CheckMode mode = CheckMode::Manual;
     bool startupConsumed = false;
     QDateTime clock, rateUntil, automaticAttempt;
-    QUrl logicalUrl, metadataUrl, checksumUrl;
+    QUrl logicalUrl, metadataUrl, checksumUrl, assetApiUrl;
     qint64 checksumSize = 0, written = 0;
     int redirectCount = 0;
     int retryCount = 0;
     qint64 requestedOffset = 0;
     bool responseAccepted = false, resumable = false;
+    bool compatibleTransport = false, useAssetApi = false, ownsManager = false;
     QByteArray entityTag;
     quint64 operation = 0, request = 0;
     QByteArray buffer;
@@ -158,7 +162,7 @@ struct Client::Impl {
     std::unique_ptr<QCryptographicHash> hash;
 
     Impl(Client *owner, const Config &c, QNetworkAccessManager *transport, const Limits &l)
-        : q(owner), config(c), limits(l), manager(transport ? transport : new QNetworkAccessManager(owner)) {
+        : q(owner), config(c), limits(l), manager(transport ? transport : new QNetworkAccessManager(owner)), ownsManager(!transport) {
         idle.setSingleShot(true); deadline.setSingleShot(true); retryTimer.setSingleShot(true);
         QObject::connect(&idle,&QTimer::timeout,q,[this]{
             if (!busy()) return;
@@ -197,6 +201,7 @@ struct Client::Impl {
     }
     void resetNetwork() { stopReply(); deadline.stop(); retryTimer.stop();QObject::disconnect(&retryTimer,nullptr,q,nullptr);buffer.clear(); }
     void fail(const Error &e, bool retainPartial=false) {
+        diagnose(DiagEvent::UpdateFailed,quint64(e.code),e.httpStatus,{},written);
         const bool wasCheck = phase == Phase::Metadata || phase == Phase::Checksum;
         ++operation; resetNetwork();
         resumable=retainPartial&&written>0&&written<release.size&&output&&hash&&temporary;
@@ -220,12 +225,25 @@ struct Client::Impl {
         const int delay=qMax(minimumDelay,limits.retryDelayMs*(1<<retryCount));
         if(delay>120000){fail(e,true);return;}
         stopReply();buffer.clear();redirectCount=0;++retryCount;
+        compatibleTransport=true;
+        useAssetApi=!useAssetApi&&!assetApiUrl.isEmpty();
+        if(ownsManager&&manager)manager->clearConnectionCache();
         const auto op=operation;
         QObject::disconnect(&retryTimer,nullptr,q,nullptr);
-        QObject::connect(&retryTimer,&QTimer::timeout,q,[this,op]{if(operation==op&&phase==Phase::Payload)startRequest(release.downloadUrl);});
+        QObject::connect(&retryTimer,&QTimer::timeout,q,[this,op]{if(operation==op&&phase==Phase::Payload)startPayloadRequest();});
         retryTimer.start(delay);
         // Deadline is intentionally not restarted: backoff counts toward it.
+        diagnose(DiagEvent::UpdateRetry,quint64(e.code),retryCount,{},written);
         emit q->downloadRetry(retryCount,limits.downloadRetries,delay,e);
+    }
+    void startPayloadRequest() {
+        // Only synthesize entry URLs from the checked asset/repository. Keep the
+        // public URL validator strict; never accept caller-provided query URLs.
+        QUrl entry=useAssetApi&&!assetApiUrl.isEmpty()?assetApiUrl:release.downloadUrl;
+        QUrlQuery fresh;
+        fresh.addQueryItem("frogshell_download",QUuid::createUuid().toString(QUuid::Id128));
+        entry.setQuery(fresh);
+        startRequest(entry);
     }
     bool restartOutput() {
         const auto path=output->fileName();output->cancelWriting();output.reset();
@@ -252,6 +270,15 @@ struct Client::Impl {
         req.setAttribute(QNetworkRequest::AuthenticationReuseAttribute,QNetworkRequest::Manual);
         req.setAttribute(QNetworkRequest::CookieLoadControlAttribute,QNetworkRequest::Manual);
         req.setAttribute(QNetworkRequest::CookieSaveControlAttribute,QNetworkRequest::Manual);
+        req.setAttribute(QNetworkRequest::CacheLoadControlAttribute,QNetworkRequest::AlwaysNetwork);
+        req.setAttribute(QNetworkRequest::CacheSaveControlAttribute,false);
+        req.setRawHeader("Cache-Control","no-cache, no-store");
+        if(phase==Phase::Payload&&compatibleTransport) {
+            // Repeating the same HTTP/2 connection can repeat a stalled stream.
+            // Recover with a fresh HTTP/1.1 connection, retaining downloaded bytes.
+            req.setAttribute(QNetworkRequest::Http2AllowedAttribute,false);
+            req.setRawHeader("Connection","close");
+        }
         req.setRawHeader("User-Agent","FrogShell-ReleaseUpdate/1");
         req.setRawHeader("Accept",phase == Phase::Metadata ? "application/vnd.github+json" : "application/octet-stream");
         req.setRawHeader("Accept-Encoding","identity");
@@ -259,7 +286,8 @@ struct Client::Impl {
             req.setRawHeader("Range","bytes="+QByteArray::number(requestedOffset)+"-");
             if(!entityTag.isEmpty())req.setRawHeader("If-Range",entityTag);
         }
-        if (phase == Phase::Metadata) req.setRawHeader("X-GitHub-Api-Version","2022-11-28");
+        if (url.host()=="api.github.com") req.setRawHeader("X-GitHub-Api-Version","2022-11-28");
+        diagnose(DiagEvent::UpdateRequest,quint64(phase),retryCount,{},written);
         auto r = manager->get(req); reply = r; r->setReadBufferSize(128*1024);
         const quint64 id = request, op = operation;
         auto active = [this,r,id,op]{return reply == r && request == id && operation == op;};
@@ -294,9 +322,12 @@ struct Client::Impl {
         if (!status) return true;
         if (status==301||status==302||status==303||status==307||status==308) return true;
         if (responseAccepted) return true;
+        diagnose(DiagEvent::UpdateResponse,quint64(phase),status,{},written);
         if (status != 200 && !(phase==Phase::Payload&&status==206)) {
             const auto e=httpError(status);
-            if(phase==Phase::Payload&&(status==408||status==500||status==502||status==503||status==504)) {
+            const bool expiredCdn=(logicalUrl.host()=="release-assets.githubusercontent.com"||logicalUrl.host()=="objects.githubusercontent.com")&&
+                (status==400||status==401||status==403||status==404);
+            if(phase==Phase::Payload&&(expiredCdn||status==408||status==500||status==502||status==503||status==504)) {
                 int delay=0;const auto after=reply->rawHeader("Retry-After");
                 if(!after.isEmpty()){
                     bool ok=false;const auto seconds=after.toLongLong(&ok);
@@ -362,6 +393,11 @@ struct Client::Impl {
                 buffer += chunk;
             }
         }
+        if (phase==Phase::Payload&&written==release.size) {
+            // A complete, hash-verified asset does not need a peer EOF/finished
+            // notification. Some proxies keep the completed stream open.
+            stopReply(); completeDownload(); return;
+        }
         if (reply && reply->bytesAvailable()) QTimer::singleShot(0,q,[this,op,id]{if(operation==op && request==id) drain();});
     }
     void finished() {
@@ -392,7 +428,8 @@ struct Client::Impl {
             case QNetworkReply::RemoteHostClosedError:case QNetworkReply::ConnectionRefusedError:
             case QNetworkReply::HostNotFoundError:case QNetworkReply::TimeoutError:
             case QNetworkReply::TemporaryNetworkFailureError:case QNetworkReply::NetworkSessionFailedError:
-            case QNetworkReply::ProxyConnectionClosedError:case QNetworkReply::ProxyTimeoutError:recover(e);break;
+            case QNetworkReply::ProxyConnectionClosedError:case QNetworkReply::ProxyTimeoutError:
+            case QNetworkReply::ProtocolFailure:recover(e);break;
             default:fail(e);break;
             }
             return;
@@ -437,6 +474,11 @@ struct Client::Impl {
         if (!allowedReleaseDownloadUrl(url,config) || !exactTail(url,{tag,expected})) {fail(error(ErrorCode::UnsafeUrl,"Portable asset URL does not match repository/tag/name"));return;}
         if (chosen.contains("state") && chosen["state"].toString() != "uploaded") {fail(error(ErrorCode::InvalidMetadata,"Portable asset is not uploaded"));return;}
         release.assetName=expected;release.downloadUrl=url;release.size=size;
+        // Public asset REST downloads require no token. Derive this exact
+        // same-repository endpoint from a numeric ID, never the asset's URL field.
+        assetApiUrl={}; qint64 assetId=0;
+        if(integerSize(chosen["id"],9007199254740991LL,&assetId))
+            assetApiUrl=QUrl("https://api.github.com/repos/"+config.owner+"/"+config.repository+"/releases/assets/"+QString::number(assetId));
         const auto digest = chosen["digest"];
         if (!digest.isUndefined() && !digest.isNull() && (!digest.isString() || !digest.toString().isEmpty())) {
             static const QRegularExpression sha("^sha256:([0-9A-Fa-f]{64})$");
@@ -484,6 +526,7 @@ struct Client::Impl {
         if(!transition(State::Ready,"Update download verified"))return;
         if(operation!=op){temporary.reset();return;}
         temporary->setAutoRemove(false);temporary.reset();
+        diagnose(DiagEvent::UpdateDone,0,0,{},written);
         emit q->downloadVerified(result);
     }
 };
@@ -503,11 +546,11 @@ bool Client::retryPending() const {return d->retryTimer.isActive();}
 void Client::setConfig(const Config &c) {
     QPointer<Client> guard(this);cancel();if(!guard)return;
     const bool changed=d->config.owner.compare(c.owner,Qt::CaseInsensitive)!=0||d->config.repository.compare(c.repository,Qt::CaseInsensitive)!=0;
-    ++d->operation;d->resetNetwork();d->cleanOutput();d->release={};d->lastError={};if(changed){d->rateUntil={};d->automaticAttempt={};}d->config=c;d->transition(State::Idle,{});
+    ++d->operation;d->resetNetwork();d->cleanOutput();d->release={};d->assetApiUrl={};d->lastError={};if(changed){d->rateUntil={};d->automaticAttempt={};}d->config=c;d->transition(State::Idle,{});
 }
 void Client::check(CheckMode mode,const Schedule &schedule) {
     if(d->busy()){emit errorOccurred(error(ErrorCode::Busy,"An update operation is already running"));return;}
-    ++d->operation;d->resetNetwork();d->cleanOutput();d->release={};d->lastError={};d->mode=mode;d->schedule=schedule;d->clock=nowFor(schedule);d->phase=Impl::Phase::Metadata;
+    ++d->operation;d->resetNetwork();d->cleanOutput();d->release={};d->assetApiUrl={};d->lastError={};d->mode=mode;d->schedule=schedule;d->clock=nowFor(schedule);d->phase=Impl::Phase::Metadata;
     if(d->config.owner.isEmpty()||d->config.repository.isEmpty()){d->finishCheck(State::Unconfigured);return;}
     QString reason;
     if(!validConfig(d->config,&reason)||!d->limitsValid()){d->fail(error(ErrorCode::InvalidConfiguration,reason.isEmpty()?"Invalid update resource limits":reason));return;}
@@ -540,6 +583,7 @@ void Client::download(const QString &directory) {
     const QFileInfo parent(directory);
     if(!parent.isDir()||parent.isSymLink()){d->fail(error(ErrorCode::Io,"Staging directory must be an existing local directory"));return;}
     if(!resume){
+    d->compatibleTransport=false;d->useAssetApi=false;
     d->temporary=std::make_unique<QTemporaryDir>(QDir(directory).filePath("frogshell-update-XXXXXX"));
     if(!d->temporary->isValid()){d->fail(error(ErrorCode::Io,"Unable to create private update staging directory"));return;}
     QFile::setPermissions(d->temporary->path(),QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
@@ -553,7 +597,7 @@ void Client::download(const QString &directory) {
     if(!d->transition(State::Downloading,"Downloading update"))return;
     if(d->operation!=op)return;
     QPointer<Client> guard(this);emit downloadProgress(d->written,d->release.size);if(!guard||d->operation!=op)return;
-    d->deadline.start(d->limits.downloadTimeoutMs);d->startRequest(d->release.downloadUrl);
+    d->deadline.start(d->limits.downloadTimeoutMs);d->startPayloadRequest();
 }
 void Client::cancel() {
     if(!d->busy()&&!d->resumable)return;

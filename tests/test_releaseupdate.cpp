@@ -18,7 +18,7 @@ struct Response {
     QByteArray body;
     QList<QPair<QByteArray,QByteArray>> headers;
     int chunk = 16384, interval = 1;
-    bool stall = false, omitLength = false;
+    bool stall = false, omitLength = false, keepOpen = false;
     qint64 closeAfter = -1;
 };
 class HttpFixture : public QObject {
@@ -40,7 +40,7 @@ class HttpFixture : public QObject {
                     if(!request->contains("\r\n\r\n"))return;
                     socket->setProperty("handled",true);
                     const auto first=request->split('\n').value(0).split(' ');
-                    const auto path=QString::fromLatin1(first.value(1));received<<path;
+                    const auto path=QUrl::fromEncoded(first.value(1)).path();received<<path;
                     const auto response=respond?respond(path,*request):routes.value(path,Response{404,"fixture missing"});
                     QByteArray headers="HTTP/1.1 "+QByteArray::number(response.status)+" Fixture\r\nConnection: close\r\n";
                     bool hasLength=false;
@@ -55,7 +55,7 @@ class HttpFixture : public QObject {
                         qint64 length=qMin<qint64>(response.chunk,response.body.size()-*offset);
                         if(response.closeAfter>=0)length=qMin(length,response.closeAfter-*offset);
                         if(length>0){socket->write(response.body.constData()+*offset,length);*offset+=length;}
-                        if(*offset>=response.body.size()||(response.closeAfter>=0&&*offset>=response.closeAfter)){timer->stop();socket->disconnectFromHost();}
+                        if(*offset>=response.body.size()||(response.closeAfter>=0&&*offset>=response.closeAfter)){timer->stop();if(!response.keepOpen)socket->disconnectFromHost();}
                     });timer->start();
                 });
             }
@@ -294,6 +294,64 @@ class ReleaseUpdateTests : public QObject {
         qint64 previous=-1;for(const auto &row:progress){const auto n=row[0].toLongLong();QVERIFY(n>=previous);QVERIFY(n<=payload.size());previous=n;QCOMPARE(row[1].toLongLong(),payload.size());}
         QCOMPARE(previous,payload.size());
     }
+    void completeAssetDoesNotWaitForConnectionClose() {
+        FixtureTransport transport(fixture);Limits limits;limits.downloadInactivityTimeoutMs=3000;
+        Client c(cfg,nullptr,&transport,limits);available(c);QTemporaryDir dir;
+        Response response{200,payload};response.omitLength=true;response.keepOpen=true;
+        fixture.routes[assetPath]=response;
+        QSignalSpy ready(&c,&Client::downloadVerified),retries(&c,&Client::downloadRetry);
+        c.download(dir.path());QTRY_COMPARE_WITH_TIMEOUT(ready.size(),1,2000);
+        QCOMPARE(c.state(),State::Ready);QCOMPARE(retries.size(),0);
+        QFile file(qvariant_cast<VerifiedDownload>(ready.first().first()).path);
+        QVERIFY(file.open(QIODevice::ReadOnly));QCOMPARE(file.readAll(),payload);
+    }
+    void retryUsesFreshAnonymousAssetApiAndCompatibleConnection() {
+        auto object=metadata();auto assets=object["assets"].toArray();auto asset=assets[0].toObject();
+        asset["id"]=123456;assets[0]=asset;object["assets"]=assets;meta(object);
+        FixtureTransport transport(fixture);Limits limits;limits.retryDelayMs=5;
+        Client c(cfg,nullptr,&transport,limits);available(c);QTemporaryDir dir;
+        const QString api="/repos/fixture/project/releases/assets/123456";
+        fixture.respond=[&](const QString &path,const QByteArray &){
+            if(path==assetPath){Response r{200,payload};r.closeAfter=32768;return r;}
+            if(path==api){Response r{206,payload.mid(32768)};r.headers.append(QPair<QByteArray,QByteArray>{"Content-Range","bytes 32768-"+QByteArray::number(payload.size()-1)+"/"+QByteArray::number(payload.size())});return r;}
+            return fixture.routes.value(path,Response{404,{}});
+        };
+        QSignalSpy ready(&c,&Client::downloadVerified),retries(&c,&Client::downloadRetry);
+        c.download(dir.path());QTRY_COMPARE_WITH_TIMEOUT(ready.size(),1,5000);QCOMPARE(retries.size(),1);
+        QCOMPARE(transport.requests.size(),3);
+        const auto first=transport.requests[1],retry=transport.requests[2];
+        QCOMPARE(retry.url().host(),QString("api.github.com"));QCOMPARE(retry.url().path(),api);
+        QVERIFY(!first.url().query().isEmpty());QVERIFY(first.url().query()!=retry.url().query());
+        QCOMPARE(retry.rawHeader("Accept"),QByteArray("application/octet-stream"));
+        QCOMPARE(retry.rawHeader("Range"),QByteArray("bytes=32768-"));
+        QVERIFY(!retry.hasRawHeader("Authorization"));QVERIFY(!retry.hasRawHeader("Cookie"));
+        QVERIFY(retry.attribute(QNetworkRequest::Http2AllowedAttribute).isValid());
+        QCOMPARE(retry.attribute(QNetworkRequest::Http2AllowedAttribute).toBool(),false);
+        QCOMPARE(retry.rawHeader("Connection"),QByteArray("close"));
+        QCOMPARE(retry.attribute(QNetworkRequest::CacheLoadControlAttribute).toInt(),int(QNetworkRequest::AlwaysNetwork));
+        QFile file(qvariant_cast<VerifiedDownload>(ready.first().first()).path);
+        QVERIFY(file.open(QIODevice::ReadOnly));QCOMPARE(file.readAll(),payload);
+    }
+    void expiredSignedCdnRedirectGetsRenewed() {
+        auto object=metadata();auto assets=object["assets"].toArray();auto asset=assets[0].toObject();
+        asset["id"]=123456;assets[0]=asset;object["assets"]=assets;meta(object);
+        FixtureTransport transport(fixture);Limits limits;limits.retryDelayMs=5;
+        Client c(cfg,nullptr,&transport,limits);available(c);QTemporaryDir dir;
+        fixture.respond=[&](const QString &path,const QByteArray &){
+            if(path==assetPath){Response r{302,{}};r.headers.append(QPair<QByteArray,QByteArray>{"Location","https://release-assets.githubusercontent.com/expired"});return r;}
+            if(path=="/expired")return Response{403,"expired signed URL"};
+            if(path=="/repos/fixture/project/releases/assets/123456"){
+                Response r{302,{}};r.headers.append(QPair<QByteArray,QByteArray>{"Location","https://release-assets.githubusercontent.com/fresh"});return r;
+            }
+            if(path=="/fresh")return Response{200,payload};
+            return fixture.routes.value(path,Response{404,{}});
+        };
+        QSignalSpy ready(&c,&Client::downloadVerified),retries(&c,&Client::downloadRetry);
+        c.download(dir.path());QTRY_COMPARE_WITH_TIMEOUT(ready.size(),1,5000);
+        QCOMPARE(retries.size(),1);QCOMPARE(transport.requests.size(),5);
+        QCOMPARE(transport.requests.last().url().path(),QString("/fresh"));
+        QVERIFY(!transport.requests.last().hasRawHeader("Authorization"));
+    }
     void cancelAndStale() {
         FixtureTransport transport(fixture);Client c(cfg,nullptr,&transport);available(c);QTemporaryDir dir;
         QSignalSpy ready(&c,&Client::downloadVerified);
@@ -437,7 +495,7 @@ class ReleaseUpdateTests : public QObject {
     }
     void redirects() {
         QFETCH(QString,target);QFETCH(bool,allowed);FixtureTransport transport(fixture);Client c(cfg,nullptr,&transport);available(c);QTemporaryDir dir;
-        Response redirect;redirect.status=302;redirect.headers.append(qMakePair(QByteArray("Location"),target.toUtf8()));fixture.routes[assetPath]=redirect;fixture.routes["/dummy?token=fixture"]=Response{200,payload};
+        Response redirect;redirect.status=302;redirect.headers.append(qMakePair(QByteArray("Location"),target.toUtf8()));fixture.routes[assetPath]=redirect;fixture.routes["/dummy"]=Response{200,payload};
         QSignalSpy ready(&c,&Client::downloadVerified);c.download(dir.path());QTRY_VERIFY_WITH_TIMEOUT(!c.busy(),5000);
         if(allowed){QCOMPARE(c.state(),State::Ready);QCOMPARE(ready.size(),1);QCOMPARE(transport.logical.size(),3);}
         else{QCOMPARE(c.lastError().code,ErrorCode::UnsafeUrl);QCOMPARE(ready.size(),0);QCOMPARE(transport.logical.size(),2);QVERIFY(files(dir.path()).isEmpty());}

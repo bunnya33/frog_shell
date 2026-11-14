@@ -16,7 +16,8 @@ enum class DiagEvent {
     FilePressBegin, FilePressEnd, FileHitBegin, FileHitEnd, FileBasePressBegin, FileBasePressEnd,
     FileReleaseBegin, FileReleaseEnd, FileExpandedBegin, FileExpandedEnd, LockStartup, MainWindowStartup,
     ConnectionWait, ConnectionResult, ConnectionExit,
-    FileActivate, DownloadRequested, DownloadQueued, TransferStart
+    FileActivate, DownloadRequested, DownloadQueued, TransferStart,
+    UpdateRequest, UpdateResponse, UpdateRetry, UpdateDone, UpdateFailed
 };
 enum class ConnectionStage { TcpConnect, Handshake, Authentication, Sftp, ChannelOpen, Exec, MonitorRead, ChannelClose, PtyRead, PtyWrite, Keepalive, Stop };
 struct ConnectionDiagnosticState {

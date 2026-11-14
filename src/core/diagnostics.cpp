@@ -140,6 +140,7 @@ const char *name(DiagEvent event) {
         E(FileReleaseBegin) E(FileReleaseEnd) E(FileExpandedBegin) E(FileExpandedEnd) E(LockStartup) E(MainWindowStartup)
         E(ConnectionWait) E(ConnectionResult) E(ConnectionExit)
         E(FileActivate) E(DownloadRequested) E(DownloadQueued) E(TransferStart)
+        E(UpdateRequest) E(UpdateResponse) E(UpdateRetry) E(UpdateDone) E(UpdateFailed)
 #undef E
     }
     return "Unknown";
