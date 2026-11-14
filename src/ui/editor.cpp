@@ -30,7 +30,11 @@ CodeEdit::CodeEdit(QWidget *p) : EditorSurface(p) {
     connect(document(), &EditorDocument::bytesChanged, this, [this](int position, int removed, int added) {
         // Highlighter/theme format refreshes can emit contentsChanged without
         // changing text. They must not clear or reschedule a valid diagnostic.
-        if (removed || added) { adjustAdvancedSearch(position, removed, added); scheduleSyntax(); }
+        if (removed || added) {
+            adjustFindMatches(position, removed, added);
+            adjustAdvancedSearch(position, removed, added);
+            scheduleSyntax();
+        }
     });
     viewport()->installEventFilter(this);
     setAccessibleName("文件编辑器");
@@ -229,15 +233,21 @@ void CodeEdit::closeFind() {
 }
 void CodeEdit::scheduleFind(bool navigate) {
     ++findRevision;
-    // Content changes only invalidate decorations. Never alter the native
-    // selection from a modification notification (typing, paste, undo or IME).
+    // Query changes invalidate results; document edits retain unaffected tracked
+    // hits until the new snapshot is ready. Never select text from an edit.
     if (navigate) clearOwnedSelection(SelectionOwner::Find);
     else if (selectionOwner == SelectionOwner::Find) {
         selectionOwner = SelectionOwner::None; ownedSelection = {};
     }
-    currentMatch = -1; matches.clear(); searchSelection = false;
+    const bool invalidate = navigate || !query || query->text().isEmpty();
+    const bool repaint = invalidate || searchSelection;
+    if (invalidate) {
+        currentMatch = -1;
+        matches.clear();
+    }
+    searchSelection = false;
     pendingFindNavigation = navigate ? FindNavigation::Forward : FindNavigation::None;
-    updateHighlights();
+    if (repaint) updateHighlights();
     if (query && query->text().isEmpty()) {
         pendingFindNavigation = FindNavigation::None;
         if (findTimer) findTimer->stop();
@@ -245,6 +255,34 @@ void CodeEdit::scheduleFind(bool navigate) {
         return;
     }
     if (findTimer) findTimer->start();
+}
+void CodeEdit::adjustFindMatches(int position, int removed, int added) {
+    const int changeEnd = position + removed;
+    int retained = 0, retainedCurrent = -1;
+    for (int i = 0; i < matches.size(); ++i) {
+        auto &match = matches[i];
+        // Drop only touched tokens. Insertions at either boundary are outside
+        // the token; word/regex context is checked by the debounced full search.
+        if ((removed && position < match.byteEnd && changeEnd > match.byteStart) ||
+            (added && position > match.byteStart && position < match.byteEnd) ||
+            (match.byteStart == match.byteEnd && position == match.byteStart)) continue;
+        if (changeEnd <= match.byteStart) {
+            match.byteStart += added - removed;
+            match.byteEnd += added - removed;
+        }
+        // EditorCursor anchors already followed the change. A right-boundary
+        // insertion must not expand the painted match to include the new text.
+        if (match.cursor.byteAnchor() != match.byteStart || match.cursor.bytePosition() != match.byteEnd) {
+            match.cursor = EditorCursor(document());
+            match.cursor.setPosition(toUtf16(match.byteStart));
+            match.cursor.setPosition(toUtf16(match.byteEnd), QTextCursor::KeepAnchor);
+        }
+        if (i == currentMatch) retainedCurrent = retained;
+        if (retained != i) matches[retained] = std::move(match);
+        ++retained;
+    }
+    matches.resize(retained);
+    currentMatch = retainedCurrent;
 }
 void CodeEdit::clearOwnedSelection(SelectionOwner owner) {
     if (selectionOwner != owner) return;
@@ -258,8 +296,9 @@ void CodeEdit::updateMatches(){
     if(findRunning)return;
     if(query->text().isEmpty()){findStatus->clear();return;}
     const QString input=toPlainText(), needle=query->text();const bool regex=findRegex->isChecked(),whole=findWord->isChecked(),sensitive=findCase->isChecked();
-    if((regex&&input.size()>262144)||needle.size()>512){findStatus->setText("超出查找限制");return;}
-    const quint64 revision=findRevision;findRunning=true;findStatus->setText("查找中…");
+    if((regex&&input.size()>262144)||needle.size()>512){matches.clear();currentMatch=-1;updateHighlights();findStatus->setText("超出查找限制");return;}
+    const quint64 revision=findRevision;findRunning=true;
+    if(matches.isEmpty())findStatus->setText("查找中…");
     struct Result {QVector<Match> matches;QString error;};auto result=std::make_shared<Result>();
     auto worker=QThread::create([input,needle,regex,whole,sensitive,result]{
         QString pattern=regex?needle:QRegularExpression::escape(needle);
@@ -283,18 +322,30 @@ void CodeEdit::updateMatches(){
     connect(worker,&QThread::finished,this,[this,result,revision]{
         findRunning=false;if(revision!=findRevision){if(findPanel&&findPanel->isVisible())findTimer->start(0);return;}
         if(!findPanel->isVisible())return;
+        const int previousStart = currentMatch >= 0 ? matches[currentMatch].byteStart : -1;
+        const int previousEnd = currentMatch >= 0 ? matches[currentMatch].byteEnd : -1;
         matches=std::move(result->matches);currentMatch=-1;
-        if(!result->error.isEmpty()){findStatus->setText(result->error);return;}
-        if(matches.isEmpty()){findStatus->setText("无结果");return;}
+        for (int i=0;i<matches.size();++i) {
+            auto &match=matches[i];
+            match.cursor=EditorCursor(document());match.cursor.setPosition(match.start);
+            match.cursor.setPosition(match.end,QTextCursor::KeepAnchor);
+            match.byteStart=match.cursor.byteAnchor();match.byteEnd=match.cursor.bytePosition();
+            if(match.byteStart==previousStart&&match.byteEnd==previousEnd)currentMatch=i;
+        }
+        if(!result->error.isEmpty()){updateHighlights();findStatus->setText(result->error);return;}
+        if(matches.isEmpty()){updateHighlights();findStatus->setText("无结果");return;}
         const auto navigation = pendingFindNavigation;
         pendingFindNavigation = FindNavigation::None;
         if (navigation != FindNavigation::None) locate(navigation == FindNavigation::Backward);
         else {
-            // Refresh the counter/highlights at the live caret without selecting
-            // text or scrolling. The user may have moved since the worker began.
-            currentMatch = 0;
-            const int position = textCursor().selectionStart();
-            for (int i=0;i<matches.size();++i) if (matches[i].start>=position) { currentMatch=i; break; }
+            // Keep the current token's identity/color even when new hits appear
+            // before it. A removed token falls back to the live caret, without
+            // selecting text or scrolling.
+            if (currentMatch < 0) {
+                currentMatch = 0;
+                const int position = textCursor().selectionStart();
+                for (int i=0;i<matches.size();++i) if (matches[i].start>=position) { currentMatch=i; break; }
+            }
             paintMatches();
         }
     });
@@ -374,11 +425,10 @@ void CodeEdit::updateHighlights() {
     QList<EditorExtraSelection> selections;
     const bool activeSearch = findPanel && findPanel->isVisible() && searchSelection &&
                               currentMatch >= 0 && currentMatch < matches.size() &&
-                              matches[currentMatch].start >= 0 &&
-                              matches[currentMatch].end <= document()->characterCount() - 1;
+                              !matches[currentMatch].cursor.isNull();
     const QColor currentColor("#eaa13b");
     if (activeSearch) {
-        appendSearchLineHighlights(selections, matches[currentMatch].start);
+        appendSearchLineHighlights(selections, matches[currentMatch].cursor.selectionStart());
     }
     if (!activeSearch && !advancedCurrent.isNull()) {
         appendSearchLineHighlights(selections, advancedCurrent.selectionStart());
@@ -389,7 +439,7 @@ void CodeEdit::updateHighlights() {
         s.format.setBackground(range.current ? advancedCurrentColor : advancedColor); s.format.setForeground(advancedInk);
         selections.append(s);
     }
-    for(int i=0;i<matches.size();++i){if(matches[i].start<0||matches[i].end>document()->characterCount()-1||matches[i].start>=matches[i].end)continue;EditorExtraSelection s;s.cursor=EditorCursor(document());s.cursor.setPosition(matches[i].start);s.cursor.setPosition(matches[i].end,QTextCursor::KeepAnchor);s.format.setBackground(i==currentMatch?currentColor:QColor("#f6d75d"));s.format.setForeground(QColor("#211806"));selections.append(s);}
+    for(int i=0;i<matches.size();++i){if(matches[i].cursor.isNull()||!matches[i].cursor.hasSelection())continue;EditorExtraSelection s;s.cursor=matches[i].cursor;s.format.setBackground(i==currentMatch?currentColor:QColor("#f6d75d"));s.format.setForeground(QColor("#211806"));selections.append(s);}
     if (syntaxResult.error) {
         const int pos = qBound(0, syntaxResult.offset, document()->characterCount() - 1);
         const auto block = document()->findBlock(pos);

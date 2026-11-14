@@ -2,7 +2,7 @@
     [string]$PythonExe = '',
     [string]$Generator = 'Visual Studio 18 2026',
     [string]$Toolset = 'v143,version=14.44.35207',
-    [string]$Version = '0.1.49',
+    [string]$Version = '0.1.50',
     [string]$Source = '',
     [string]$Output = '',
     [string]$Manifest = '',

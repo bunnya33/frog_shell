@@ -51,7 +51,14 @@ class CodeEdit : public EditorSurface {
     QLabel *findStatus = nullptr;
     QToolButton *findCase = nullptr, *findWord = nullptr, *findRegex = nullptr, *preserveCase = nullptr;
     QToolButton *findToggle = nullptr;
-    struct Match { int start=0, end=0; QStringList captures; };
+    struct Match {
+        // UTF-16 offsets/captures belong to the last completed search snapshot.
+        // Live decorations use tracked byte anchors while a refresh is pending.
+        int start=0, end=0;
+        QStringList captures;
+        EditorCursor cursor;
+        int byteStart=0, byteEnd=0;
+    };
     QVector<Match> matches;
     quint64 findRevision = 0;
     bool findRunning = false;
@@ -79,6 +86,7 @@ class CodeEdit : public EditorSurface {
     void locate(bool backwards = false);
     void ensureFindPanel();
     void scheduleFind(bool navigate = true);
+    void adjustFindMatches(int position, int removed, int added);
     void updateMatches();
     void paintMatches();
     void updateHighlights();

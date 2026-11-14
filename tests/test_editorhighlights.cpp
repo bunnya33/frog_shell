@@ -248,6 +248,117 @@ class EditorHighlightTests : public QObject {
         QCOMPARE(edit.verticalScrollBar()->value(),scroll);QCOMPARE(edit.toPlainText(),changed);
         QCOMPARE(edit.matches.size(),2);
     }
+    void unrelatedEditsKeepFindHighlights_data() {
+        QTest::addColumn<bool>("light");
+        QTest::newRow("dracula") << false;
+        QTest::newRow("github-light") << true;
+    }
+    void unrelatedEditsKeepFindHighlights() {
+        QFETCH(bool, light); applyTheme(light);
+        CodeEdit edit; edit.resize(760,300);
+        edit.setPlainText(QString::fromUtf8("前缀😀 needle first\nedit here\nneedle last\n"));
+        edit.show(); edit.showFind(); edit.query->setText("needle");
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        edit.locate(); QCOMPARE(edit.currentMatch,1);
+        edit.setFocus(); placeOnLine(edit,1); edit.moveCursor(QTextCursor::EndOfBlock);
+        const auto status=edit.findStatus->text();
+        auto verifyPaint = [&] {
+            const auto text=edit.toPlainText();
+            const int first=edit.fromUtf16(text.indexOf("needle"));
+            const int last=edit.fromUtf16(text.lastIndexOf("needle"));
+            return edit.send(SCI_INDICATORVALUEAT,8,first)!=0 && edit.send(SCI_INDICATORVALUEAT,9,last)!=0;
+        };
+        QVERIFY(verifyPaint());
+        QTest::keyClicks(&edit,"!");
+        QVERIFY(edit.findTimer->isActive());
+        QVERIFY2(verifyPaint(),"Unrelated typing erased live search indicators during the debounce interval");
+        QCOMPARE(edit.findStatus->text(),status);
+        const auto caret=edit.textCursor();
+        // Repaint while the worker is deliberately pending: no blank frame.
+        edit.findTimer->stop(); edit.findTimer->start(10000);
+        const auto shot=image(edit);
+        QVERIFY(colorPixels(shot,QColor("#f6d75d"))>20);
+        QVERIFY(colorPixels(shot,QColor("#eaa13b"))>20);
+        save(shot,light?"retained-find-light":"retained-find-dark");
+        edit.findTimer->stop(); edit.findTimer->setInterval(100); edit.updateMatches();
+        QVERIFY(edit.findRunning); QVERIFY(verifyPaint());
+        QCOMPARE(edit.findStatus->text(),status);
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        QVERIFY(verifyPaint()); QCOMPARE(edit.textCursor(),caret);
+        // Shift both hits with a UTF-8/CJK/emoji/multiline insertion, then undo.
+        EditorCursor beginning(edit.document()); beginning.setPosition(0); edit.setTextCursor(beginning);
+        edit.insertPlainText(QString::fromUtf8("新增😀\n"));
+        QVERIFY(verifyPaint());
+        edit.undo(); QVERIFY(verifyPaint()); edit.redo(); QVERIFY(verifyPaint());
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        QVERIFY(verifyPaint()); QCOMPARE(edit.currentMatch,1);
+    }
+    void editingOneHitKeepsOtherFindHighlights() {
+        CodeEdit edit; edit.resize(760,300); edit.setPlainText("needle first\nneedle second\nneedle last\n");
+        edit.show(); edit.showFind(); edit.query->setText("needle");
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        edit.locate(); QCOMPARE(edit.currentMatch,1);
+        EditorCursor inside(edit.document()); inside.setPosition(2); edit.setTextCursor(inside);
+        edit.insertPlainText("X");
+        const int current=edit.toPlainText().indexOf("needle");
+        const int last=edit.toPlainText().lastIndexOf("needle");
+        QVERIFY(edit.send(SCI_INDICATORVALUEAT,9,edit.fromUtf16(current))!=0);
+        QVERIFY(edit.send(SCI_INDICATORVALUEAT,8,edit.fromUtf16(last))!=0);
+        QCOMPARE(edit.send(SCI_INDICATORVALUEAT,8,0),0);
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        QCOMPARE(edit.matches.size(),2); QCOMPARE(edit.currentMatch,0);
+        QVERIFY(edit.send(SCI_INDICATORVALUEAT,9,edit.fromUtf16(current))!=0);
+        QVERIFY(!edit.textCursor().hasSelection());
+    }
+    void newHitBeforeCurrentDoesNotChangeCurrentFindHighlight() {
+        CodeEdit edit; edit.resize(760,300); edit.setPlainText("prefix\nneedle first\nneedle last\n");
+        edit.show(); edit.showFind(); edit.query->setText("needle");
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        edit.locate(); QCOMPARE(edit.currentMatch,1);
+        EditorCursor beginning(edit.document()); beginning.setPosition(0); edit.setTextCursor(beginning);
+        edit.insertPlainText("needle new\n");
+        const auto caret=edit.textCursor();
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        QCOMPARE(edit.matches.size(),3); QCOMPARE(edit.currentMatch,2);
+        QCOMPARE(edit.textCursor(),caret);
+        QVERIFY(edit.send(SCI_INDICATORVALUEAT,9,edit.fromUtf16(edit.toPlainText().lastIndexOf("needle")))!=0);
+    }
+    void findBoundaryEditsAndContextChanges_data() {
+        QTest::addColumn<QString>("pattern");
+        QTest::addColumn<bool>("whole");
+        QTest::addColumn<bool>("regex");
+        QTest::addColumn<int>("position");
+        QTest::addColumn<QString>("insert");
+        QTest::addColumn<int>("remaining");
+        QTest::newRow("left-boundary") << QString("needle") << false << false << 0 << QString::fromUtf8("前😀") << 2;
+        QTest::newRow("right-boundary") << QString("needle") << false << false << 6 << QString::fromUtf8("后😀") << 2;
+        QTest::newRow("whole-word-context") << QString("needle") << true << false << 6 << QString("x") << 1;
+        QTest::newRow("regex-lookahead-context") << QString("needle(?= )") << false << true << 6 << QString("x") << 1;
+    }
+    void findBoundaryEditsAndContextChanges() {
+        QFETCH(QString, pattern); QFETCH(bool, whole); QFETCH(bool, regex);
+        QFETCH(int, position); QFETCH(QString, insert); QFETCH(int, remaining);
+        CodeEdit edit; edit.resize(760,300); edit.setPlainText("needle first\nneedle last\n");
+        edit.show(); edit.showFind(); edit.findWord->setChecked(whole); edit.findRegex->setChecked(regex); edit.query->setText(pattern);
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        QCOMPARE(edit.matches.size(),2); edit.locate();
+        EditorCursor boundary(edit.document()); boundary.setPosition(position); edit.setTextCursor(boundary); edit.insertPlainText(insert);
+        const auto text=edit.toPlainText(); const int first=text.indexOf("needle"),last=text.lastIndexOf("needle");
+        QVERIFY(edit.send(SCI_INDICATORVALUEAT,8,edit.fromUtf16(first))!=0);
+        QCOMPARE(edit.send(SCI_INDICATORVALUEAT,8,edit.fromUtf16(first+6)),0);
+        QVERIFY(edit.send(SCI_INDICATORVALUEAT,9,edit.fromUtf16(last))!=0);
+        const auto caret=edit.textCursor();
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        QCOMPARE(edit.matches.size(),remaining); QCOMPARE(edit.textCursor(),caret);
+        QVERIFY(edit.send(SCI_INDICATORVALUEAT,9,edit.fromUtf16(last))!=0);
+        if(remaining==1)QCOMPARE(edit.send(SCI_INDICATORVALUEAT,8,edit.fromUtf16(first)),0);
+        // Clearing the query must still remove indicators immediately, including
+        // a pending worker's late completion.
+        edit.insertPlainText("!"); edit.query->clear();
+        QVERIFY(edit.extraSelections().isEmpty());
+        QCOMPARE(edit.send(SCI_INDICATORVALUEAT,9,edit.fromUtf16(last)),0);
+        QTest::qWait(180); QVERIFY(edit.extraSelections().isEmpty());
+    }
     void closingFindPreservesManualSelectionAndRejectsStaleResults() {
         CodeEdit edit; edit.setPlainText(QString(150000,'x')+" needle end"); edit.resize(700,300); edit.show();
         edit.showFind(); auto query=edit.findChild<QLineEdit *>("findQuery"); auto status=edit.findChild<QLabel *>("findStatus");
