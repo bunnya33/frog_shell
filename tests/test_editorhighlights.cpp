@@ -359,6 +359,24 @@ class EditorHighlightTests : public QObject {
         QCOMPARE(edit.send(SCI_INDICATORVALUEAT,9,edit.fromUtf16(last)),0);
         QTest::qWait(180); QVERIFY(edit.extraSelections().isEmpty());
     }
+    void bulkReplaceDoesNotRepaintRemainingHitsPerEdit() {
+        constexpr int count=512;
+        CodeEdit edit; edit.resize(760,300); edit.setPlainText(QString("needle\n").repeated(count));
+        edit.show(); edit.showFind(true); edit.query->setText("needle");
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        QCOMPARE(edit.matches.size(),count); edit.replacement->setText("changed");
+        qint64 paintedTokens=0;
+        connect(edit.document(),&EditorDocument::bytesChanged,&edit,[&] {
+            paintedTokens+=edit.extraSelections().size();
+        });
+        QElapsedTimer elapsed; elapsed.start(); edit.replaceMatches(true);
+        qInfo() << "bulk replacement milliseconds:" << elapsed.elapsed() << "cumulative decorations:" << paintedTokens;
+        QCOMPARE(edit.toPlainText(),QString("changed\n").repeated(count));
+        QVERIFY2(paintedTokens<=count*2,"Bulk replace repeatedly painted remaining search results (quadratic work)");
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
+        QVERIFY(edit.matches.isEmpty()); edit.undo();
+        QCOMPARE(edit.toPlainText(),QString("needle\n").repeated(count));
+    }
     void closingFindPreservesManualSelectionAndRejectsStaleResults() {
         CodeEdit edit; edit.setPlainText(QString(150000,'x')+" needle end"); edit.resize(700,300); edit.show();
         edit.showFind(); auto query=edit.findChild<QLineEdit *>("findQuery"); auto status=edit.findChild<QLabel *>("findStatus");

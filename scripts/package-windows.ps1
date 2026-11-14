@@ -1,7 +1,7 @@
 ﻿param(
     [string]$QtRoot = "$PSScriptRoot/../.tools/Qt/6.8.3/msvc2022_64",
     [string]$OpenSSLRoot = "$PSScriptRoot/../.tools/Qt/Tools/OpenSSLv3/Win_x64",
-    [string]$Version = '0.1.50',
+    [string]$Version = '0.1.51',
     [string]$BuildRoot = "$PSScriptRoot/../build",
     [string]$Destination = ''
 )
@@ -118,4 +118,4 @@ Copy-Item -LiteralPath "$projectRoot/docs/0.1.44-clock.zh-CN.md","$projectRoot/d
 Copy-Item -LiteralPath "$projectRoot/docs/FrogShell-0.1.45验证记录.md","$projectRoot/docs/0.1.45-update.zh-CN.md","$projectRoot/docs/0.1.45-installer.zh-CN.md" -Destination "$destination/docs"
 Copy-Item -LiteralPath "$projectRoot/docs/FrogShell-0.1.46验证记录.md","$projectRoot/docs/0.1.46-update.zh-CN.md" -Destination "$destination/docs"
 Copy-Item -LiteralPath "$projectRoot/docs/FrogShell-0.1.47验证记录.md","$projectRoot/docs/0.1.47-update.zh-CN.md" -Destination "$destination/docs"
-Copy-Item -LiteralPath "$projectRoot/docs/FrogShell-0.1.50验证记录.md","$projectRoot/docs/0.1.50-update.zh-CN.md" -Destination "$destination/docs"
+Copy-Item -LiteralPath "$projectRoot/docs/FrogShell-0.1.51验证记录.md","$projectRoot/docs/0.1.51-update.zh-CN.md" -Destination "$destination/docs"

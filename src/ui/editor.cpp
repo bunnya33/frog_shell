@@ -490,6 +490,10 @@ QString CodeEdit::replacementFor(const Match &match) const {
 void CodeEdit::replaceMatches(bool all){
     if(isReadOnly()||matches.isEmpty()||findRunning||findTimer->isActive())return;
     const auto selected=matches;const int chosen=currentMatch;if(!all&&(chosen<0||chosen>=selected.size()))return;
+    // Replace-all consumes the entire snapshot as one undoable operation.
+    // Retaining/repainting the shrinking hit set on every individual change
+    // would turn a bulk replacement into quadratic decoration work.
+    if(all){matches.clear();currentMatch=-1;searchSelection=false;updateHighlights();}
     EditorCursor edit(document());edit.beginEditBlock();
     for(int i=selected.size()-1;i>=0;--i)if(all||i==chosen){edit.setPosition(selected[i].start);edit.setPosition(selected[i].end,QTextCursor::KeepAnchor);edit.insertText(replacementFor(selected[i]));}
     edit.endEditBlock();if(!all)setTextCursor(edit);scheduleFind();
