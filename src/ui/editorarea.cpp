@@ -1,5 +1,6 @@
 #include "../core/operationgate.h"
 #include "editorarea.h"
+#include "editorcompare.h"
 #include "theme.h"
 #include "icons.h"
 #include "fileicons.h"
@@ -185,6 +186,7 @@ EditorTabs *EditorArea::makeGroup() {
     connect(group, &EditorTabs::closeEditor, this, &EditorArea::closePageRequested);
     connect(group, &EditorTabs::floatEditor, this, &EditorArea::floatPageRequested);
     connect(group, &EditorTabs::moveEditor, this, &EditorArea::movePageRequested);
+    connect(group, &EditorTabs::compareEditor, this, &EditorArea::openComparison);
     connect(group, &EditorTabs::dragRequested, this, [this,group](QWidget *page) { startDrag(group,page); });
     connect(group, &EditorTabs::interactionFinished, this, &EditorArea::scheduleCleanup);
     connect(group, &QTabWidget::currentChanged, this, [this,group] {
@@ -240,6 +242,23 @@ void EditorArea::removePage(QWidget *page) {
         scheduleCleanup();
         emit layoutChanged();
     }
+}
+void EditorArea::openComparison(Editor *source) {
+    auto group = groupFor(source);
+    if (OperationGate::locked() || !group) return;
+    for (auto tabs : groups()) {
+        for (int i = 0; i < tabs->count(); ++i) {
+            auto comparison = qobject_cast<EditorCompare *>(tabs->widget(i));
+            if (comparison && comparison->sourceEditor() == source) {
+                activatePage(comparison);
+                comparison->setFocus();
+                return;
+            }
+        }
+    }
+    auto comparison = new EditorCompare(source);
+    addPage(comparison,comparison->windowTitle(),group);
+    comparison->setFocus();
 }
 bool EditorArea::movePage(QWidget *page, EditorTabs *target, DropZone zone, int index) {
     if (page && page->property("terminalPage").toBool()) return false;
@@ -401,7 +420,7 @@ bool EditorArea::outsideApplication(QPoint point){
 }
 void EditorArea::dragFeedback(QDrag *drag,QPoint global){
     if(!drag)return;
-    const bool outside=outsideApplication(global);
+    const bool outside=drag->property("canFloatPage").toBool() && outsideApplication(global);
     if(drag->property("floatCursorOutside").isValid()&&drag->property("floatCursorOutside").toBool()==outside)return;
     drag->setProperty("floatCursorOutside",outside);
     // Qt/Windows GiveFeedback tracks dragCursor(action).cacheKey and recreates
@@ -417,6 +436,8 @@ void EditorArea::startDrag(EditorTabs *source, QWidget *page) {
     dragging = true;
     auto drag = new QDrag(source);
     drag->setMimeData(mime);
+    const bool canFloat = !qobject_cast<EditorCompare *>(page);
+    drag->setProperty("canFloatPage",canFloat);
     QPointer<EditorArea> self(this);
     QPointer<QWidget> guardedPage(page);
     QPointer<EditorDragMime> guardedMime(mime);
@@ -459,7 +480,7 @@ void EditorArea::startDrag(EditorTabs *source, QWidget *page) {
     if (!self) return;
     clearPreview();
     bool outside = false;
-    if (guardedMime && guardedDrag && guardedPage && result == Qt::IgnoreAction &&
+    if (canFloat && guardedMime && guardedDrag && guardedPage && result == Qt::IgnoreAction &&
         !guardedMime->committed && !release.cancelled && release.released && validDrag(guardedMime)) {
         outside = outsideApplication(release.releasePosition);
     }

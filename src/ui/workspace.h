@@ -126,6 +126,7 @@ class Workspace : public QWidget {
     }
     int pendingTransfers() const;
     int tunnelCount() const;
+    std::optional<TunnelCounts> tunnelCounts() const;
     bool hasServiceConnection() const;
     void showPorts();
     void startPortRule(const QString &id);
@@ -146,6 +147,7 @@ class Workspace : public QWidget {
     void executeCommand(Command command,QWidget *focus);
   signals:
     void stateChanged();
+    void tunnelCountsChanged();
     void readyToClose();
     void shutdownComplete();
     void closeCancelled();

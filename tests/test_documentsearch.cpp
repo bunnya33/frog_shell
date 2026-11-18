@@ -103,6 +103,33 @@ class DocumentSearchTests : public QObject {
         find->clear();QCOMPARE(a->code->textCursor().selectedText(),QString("修复"));underline=false;for(const auto &s:a->code->extraSelections())underline|=s.format.underlineStyle()==QTextCharFormat::WaveUnderline;QVERIFY(underline);
         workspace->closePage(controller.results());underline=false;for(const auto &s:a->code->extraSelections())underline|=s.format.underlineStyle()==QTextCharFormat::WaveUnderline;QVERIFY(underline);
     }
+    void searchDialogSeedsLiteralEditorSelection() {
+        QMainWindow main;
+        auto workspace = new Workspace(profile("seed-selection"),{},true);
+        main.setCentralWidget(workspace);
+        const QString selected = "a+b\n 中文";
+        auto editor = add(*workspace,"/test/seed.txt",selected+"\nseparator\n"+selected);
+        DocumentSearchController controller(&main);
+        controller.registerWorkspace(workspace);
+        main.show();
+        EditorCursor span(editor->code->document());
+        span.setPosition(selected.size(),QTextCursor::KeepAnchor);
+        editor->code->setTextCursor(span);
+        auto dialog = controller.parameters();
+        auto regex = dialog->findChild<QCheckBox *>("advancedSearchRegex");
+        regex->setChecked(true);
+        QVERIFY(controller.openFor(editor->code));
+        QCOMPARE(dialog->options().query,selected);
+        QVERIFY(!regex->isChecked());
+        QSignalSpy done(&controller,&DocumentSearchController::searchFinished);
+        controller.executeSearch();
+        QTRY_COMPARE(done.count(),1);
+        QCOMPARE(controller.results()->outcome().matchCount,2);
+        span.clearSelection();
+        editor->code->setTextCursor(span);
+        QVERIFY(controller.openFor(editor->code));
+        QCOMPARE(dialog->options().query,selected);
+    }
     void sourceStableAndSingleContainer(){
         QMainWindow main;auto workspace=new Workspace(profile(),{},true);main.setCentralWidget(workspace);auto a=add(*workspace,"/test/warning.log",sample()),b=add(*workspace,"/test/server.js","get gateway error B");
         DocumentSearchController controller(&main);controller.registerWorkspace(workspace);main.resize(1000,700);main.show();

@@ -196,21 +196,39 @@ MainWindow::MainWindow(bool demonstration, std::shared_ptr<SecretBackend> backen
     headingLayout->addWidget(import);
     cl->addLayout(actions);
     connections = new SafeTreeWidget;
-    connections->setColumnCount(5);connections->setHeaderLabels({"名称", "地址", "用户", "环境", "状态"});
+    connections->setProperty("processTable",true);
+    bindUiFont(connections,13);
+    connections->setHeader(processHeader(false,connections));
+    connections->header()->setSortIndicatorShown(false);
+    connections->header()->setSectionsClickable(false);
+    connections->setColumnCount(tunnelColumn+1);
+    connections->setHeaderLabels({"名称", "地址", "用户", "环境", "状态", "隧道"});
     connections->headerItem()->setTextAlignment(3,Qt::AlignCenter);
+    connections->headerItem()->setTextAlignment(tunnelColumn,Qt::AlignCenter);
+    connections->headerItem()->setToolTip(tunnelColumn,"运行中的隧道数 / 已配置的隧道总数");
     connections->setEditTriggers(QAbstractItemView::NoEditTriggers);
     connections->setSelectionBehavior(QAbstractItemView::SelectRows);connections->setSelectionMode(QAbstractItemView::ExtendedSelection);
     connections->setUniformRowHeights(true);connections->setAllColumnsShowFocus(true);
+    connections->setAlternatingRowColors(true);
+    connections->setFrameShape(QFrame::NoFrame);
+    connections->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+    connections->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     connections->header()->setStretchLastSection(false);connections->header()->setSectionResizeMode(QHeaderView::Interactive);
-    UiZoom::instance().bind(connections,"columns",[this]{scalingColumns=true;for(int c=0;c<5;++c)connections->setColumnWidth(c,uiPx(connectionColumns[c]));scalingColumns=false;if(!customConnectionColumns)fitConnectionColumns();});
+    UiZoom::instance().bind(connections,"columns",[this] {
+        QScopedValueRollback<bool> guard(scalingColumns,true);
+        for (int column=0;column<connections->columnCount();++column)
+            connections->setColumnWidth(column,uiPx(connectionColumns[column]));
+        fitConnectionColumns();
+    });
     connect(connections->header(),&QHeaderView::sectionResized,this,[this](int c,int,int size){if(!scalingColumns&&!UiZoom::instance().changing()){connectionColumns[c]=uiBase(size);customConnectionColumns=true;}});
     connections->setItemDelegate(new ConnectionDelegate(connections));
-    connections->setProperty("connectionList",true);
-    UiZoom::instance().bind(connections,"rowHeight",[this]{for(QTreeWidgetItemIterator it(connections);*it;++it)(*it)->setSizeHint(0,QSize(0,uiPx((*it)->parent()?28:46)));connections->setIndentation(uiPx(18));});
+    UiZoom::instance().bind(connections,"density",[this] {
+        connections->setIndentation(uiPx(18));
+        connections->doItemsLayout();
+    });
     connections->setContextMenuPolicy(Qt::CustomContextMenu);
     connections->setAccessibleName("服务器连接列表");connections->viewport()->installEventFilter(this);
-    connections->setUniformRowHeights(false);
-    cl->addWidget(connections, 1);
+    cl->addWidget(processCard(connections),1);
     split->addWidget(center);
     auto detailPanel=new QWidget;detailPanel->setObjectName("side");
     auto dl=new QVBoxLayout(detailPanel);uiMargins(dl,18,18,18,18);uiSpacing(dl,8);
@@ -306,6 +324,13 @@ MainWindow::MainWindow(bool demonstration, std::shared_ptr<SecretBackend> backen
         m.addAction("关闭工作区", this, [this, w] { closeWorkspace(w); });
         m.exec(tabs->tabBar()->mapToGlobal(p));
     });
+    QString tunnelConfigError;
+    for (const auto &rule : loadAllTunnelRules(&tunnelConfigError)) {
+        auto &counts = connectionTunnels[rule.profileId];
+        if (!counts) counts.emplace();
+        ++counts->total;
+    }
+    tunnelRulesReadable = tunnelConfigError.isEmpty();
     refresh();
     restoreGeometry(QSettings().value("window/geometry").toByteArray());
     keepWindowOnScreen(this);
@@ -317,6 +342,7 @@ MainWindow::MainWindow(bool demonstration, std::shared_ptr<SecretBackend> backen
         p.user = "demo";
         auto w = new Workspace(p, {}, true, nullptr, &repository, &bookmarks);
         workspaces[p.id] = w;
+        trackWorkspaceTunnels(w);
         advancedSearch->registerWorkspace(w);
         tabs->addTab(w, "[测试] staging-api · 预览");
         configureWorkspaceTab(w);
@@ -328,8 +354,36 @@ MainWindow::MainWindow(bool demonstration, std::shared_ptr<SecretBackend> backen
 void MainWindow::fitConnectionColumns(){
     if(customConnectionColumns)return;
     QScopedValueRollback<bool> guard(scalingColumns,true);
-    int fixed=0;for(int col:{0,2,3,4})fixed+=connections->columnWidth(col);
-    connections->setColumnWidth(1,qMax(uiPx(260),connections->viewport()->width()-fixed));
+    int fixed=0;
+    for (int column=0;column<connections->columnCount();++column)
+        if (column!=1) fixed+=connections->columnWidth(column);
+    connections->setColumnWidth(1,qMax(uiPx(148),connections->viewport()->width()-fixed));
+}
+void MainWindow::trackWorkspaceTunnels(Workspace *workspace) {
+    const auto update = [this,workspace] {
+        updateConnectionTunnels(workspace->profile.id,workspace->tunnelCounts());
+    };
+    connect(workspace,&Workspace::tunnelCountsChanged,this,update);
+    update();
+}
+void MainWindow::updateConnectionTunnels(const QString &id,std::optional<TunnelCounts> counts) {
+    connectionTunnels.insert(id,counts);
+    for (int row=0;row<connections->topLevelItemCount();++row) {
+        auto item=connections->topLevelItem(row);
+        if (item->data(0,Qt::UserRole).toString()!=id) continue;
+        setConnectionTunnelCell(item);
+        break;
+    }
+}
+void MainWindow::setConnectionTunnelCell(QTreeWidgetItem *item) const {
+    const auto id = item->data(0,Qt::UserRole).toString();
+    const auto known = connectionTunnels.constFind(id);
+    const auto counts = known!=connectionTunnels.cend() ? *known :
+        (tunnelRulesReadable ? std::optional<TunnelCounts>(TunnelCounts{}) : std::nullopt);
+    item->setTextAlignment(tunnelColumn,Qt::AlignCenter);
+    item->setText(tunnelColumn,counts ? QString("%1/%2").arg(counts->running).arg(counts->total) : QString("—"));
+    item->setToolTip(tunnelColumn,counts ? QString("运行中 %1 个，共配置 %2 个隧道").arg(counts->running).arg(counts->total)
+                                       : QString("无法读取隧道配置"));
 }
 bool MainWindow::eventFilter(QObject *object,QEvent *event){
     if(connections && object==connections->viewport() && event->type()==QEvent::Resize)fitConnectionColumns();
@@ -368,8 +422,9 @@ void MainWindow::refresh() {
         const auto status = state == ConnectionState::Connected ? QStringLiteral("已连接")
                           : state == ConnectionState::Connecting ? QStringLiteral("连接中") : QStringLiteral("未连接");
         const QStringList values={p.name,p.host+(p.port==22?"":":"+QString::number(p.port)),p.user,p.environment,status};
-        item->setData(0,Qt::UserRole,p.id);item->setSizeHint(0,QSize(0,uiPx(46)));
-        for(int c=0;c<5;++c){item->setText(c,values[c]);item->setToolTip(c,Qt::convertFromPlainText(values[c]));}
+        item->setData(0,Qt::UserRole,p.id);
+        for(int c=0;c<values.size();++c){item->setText(c,values[c]);item->setToolTip(c,Qt::convertFromPlainText(values[c]));}
+        setConnectionTunnelCell(item);
         item->setData(4,ConnectionStateRole,int(state));
         if(w && state==ConnectionState::Disconnected)item->setToolTip(4,"工作区已打开，SSH 未连接");
         const auto q=search->text().trimmed();
@@ -382,7 +437,7 @@ void MainWindow::refresh() {
             auto child=children.take(b.id);if(!child)child=new QTreeWidgetItem;
             const int prev=item->indexOfChild(child);if(prev!=position){viewChanged=true;if(prev>=0)item->takeChild(prev);item->insertChild(position,child);}++position;
             child->setData(0,Qt::UserRole,p.id);child->setData(0,BookmarkIdRole,b.id);child->setText(0,b.name());child->setText(1,b.path);
-            child->setToolTip(0,Qt::convertFromPlainText(b.name()));child->setToolTip(1,Qt::convertFromPlainText(b.path));child->setIcon(0,FileIconProvider::directory());child->setSizeHint(0,QSize(0,uiPx(28)));
+            child->setToolTip(0,Qt::convertFromPlainText(b.name()));child->setToolTip(1,Qt::convertFromPlainText(b.path));child->setIcon(0,FileIconProvider::directory());
         }
         viewChanged|=!children.isEmpty();qDeleteAll(children);
     }
@@ -607,6 +662,7 @@ void MainWindow::open(const Profile &selectedProfile, std::optional<QByteArray> 
     }
     auto w = new Workspace(p, secret, false, nullptr, &repository, &bookmarks);
     workspaces[p.id] = w;
+    trackWorkspaceTunnels(w);
     advancedSearch->registerWorkspace(w);
     tabs->addTab(w, "[" + p.environment + "] " + p.name);
     configureWorkspaceTab(w);
@@ -746,6 +802,9 @@ void MainWindow::configurePorts(const QString &id) {
     auto value=find(id);if(!value)return;
     QDialog dialog(this);dialog.setWindowTitle("端口配置 · "+value->name);dialog.resize(620,360);
     auto layout=new QVBoxLayout(&dialog);auto panel=new PortsPanel(id,true);layout->addWidget(panel,1);
+    connect(panel,&PortsPanel::configurationChanged,&dialog,[this,id,panel] {
+        updateConnectionTunnels(id,panel->tunnelCounts());
+    });
     auto close=new QDialogButtonBox(QDialogButtonBox::Close);layout->addWidget(close);
     connect(close,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
     QString requested;
@@ -884,6 +943,9 @@ void MainWindow::closeWorkspace(Workspace *w, bool approved) {
     connect(w, &Workspace::shutdownComplete, this, [this, w] {
         stopping.remove(w);
         workspaces.remove(w->profile.id);
+        auto counts=w->tunnelCounts();
+        if (counts) counts->running=0;
+        updateConnectionTunnels(w->profile.id,counts);
         tabs->removeTab(tabs->indexOf(w));
         w->deleteLater();
         refresh();

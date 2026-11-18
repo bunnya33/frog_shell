@@ -138,6 +138,74 @@ SyntaxDiagnostic json(SyntaxFormat format, const QString &text) {
     return at(text, pos, e.errorString());
 }
 }
+JsonFormatResult formatJson(const QString &text, qsizetype sizeLimit) {
+    if (text.size()>sizeLimit) return {{},{},true};
+    const auto diagnostic = json(SyntaxFormat::Json,text);
+    if (diagnostic.error) return {{},diagnostic};
+
+    // Use the parser only for validation. Reserializing its value would sort
+    // keys, drop duplicates, and round numbers. Copy every token as written.
+    auto space = [](QChar c) {
+        return c==u' ' || c==u'\t' || c==u'\r' || c==u'\n';
+    };
+    QString output;
+    output.reserve(qMin(text.size(),sizeLimit));
+    qsizetype i=0;
+    if (text.startsWith(QChar(0xfeff))) output += text[i++];
+    int depth=0;
+    auto newline = [&] {
+        output += u'\n';
+        output += QString(depth*4,u' ');
+    };
+    auto skipSpace = [&] { while (i<text.size() && space(text[i])) ++i; };
+    skipSpace();
+    while (i<text.size()) {
+        const auto token=text[i++];
+        switch (token.unicode()) {
+        case u'{':
+        case u'[': {
+            output += token;
+            skipSpace();
+            const QChar close = token==u'{' ? u'}' : u']';
+            if (i<text.size() && text[i]==close) output += text[i++];
+            else { ++depth; newline(); }
+            break;
+        }
+        case u'}':
+        case u']':
+            --depth;
+            newline();
+            output += token;
+            break;
+        case u',':
+            output += token;
+            newline();
+            break;
+        case u':':
+            output += QStringLiteral(": ");
+            break;
+        case u'"': {
+            const auto start=i-1;
+            while (i<text.size()) {
+                const auto c=text[i++];
+                if (c==u'\\' && i<text.size()) ++i;
+                else if (c==u'"') break;
+            }
+            output += QStringView(text).mid(start,i-start);
+            break;
+        }
+        default:
+            output += token;
+        }
+        if (output.size()>sizeLimit) return {{},{},true};
+        skipSpace();
+    }
+    for (qsizetype tail=text.size(); tail>0 && space(text[tail-1]); --tail) {
+        if (text[tail-1]==u'\n') { output += u'\n'; break; }
+    }
+    if (output.size()>sizeLimit) return {{},{},true};
+    return {std::move(output),{}};
+}
 SyntaxFormat syntaxFormatForPath(const QString &path) {
     const auto ext = QFileInfo(path).suffix().toLower();
     if (ext == "json") return SyntaxFormat::Json;

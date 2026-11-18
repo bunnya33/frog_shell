@@ -205,6 +205,7 @@ class EditorHighlightTests : public QObject {
         QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
         QCOMPARE(edit.textCursor(),manual); QCOMPARE(edit.textCursor().selectedText(),QString("!"));
         // Editing a selected search hit must not select another hit afterwards.
+        placeOnLine(edit, 2);
         edit.showFind(); QTRY_VERIFY_WITH_TIMEOUT(!edit.findRunning&&!edit.findTimer->isActive(),5000);
         QCOMPARE(edit.textCursor().selectedText(),QString("needle"));
         edit.setFocus(); QTest::keyClicks(&edit,"changed");
@@ -218,6 +219,25 @@ class EditorHighlightTests : public QObject {
         // Explicit navigation continues to select matches normally.
         query->setFocus(); QTest::keyClick(query,Qt::Key_Return);
         QTRY_COMPARE(edit.textCursor().selectedText(),QString("needle"));
+    }
+    void findShortcutSeedsLiteralMultilineSelection() {
+        CodeEdit edit;
+        edit.resize(760,300);
+        const QString selected = "a+b\n 中文";
+        edit.setPlainText(selected + "\nseparator\n" + selected);
+        edit.show();
+        edit.showFind();
+        edit.findRegex->setChecked(true);
+        edit.query->setText("separator");
+        QTRY_COMPARE(edit.matches.size(),1);
+        edit.setFocus();
+        EditorCursor span(edit.document());
+        span.setPosition(selected.size(),QTextCursor::KeepAnchor);
+        edit.setTextCursor(span);
+        QTest::keyClick(&edit,Qt::Key_F,Qt::ControlModifier);
+        QCOMPARE(edit.query->text(),selected);
+        QVERIFY(!edit.findRegex->isChecked());
+        QTRY_COMPARE(edit.matches.size(),2);
     }
     void movingCaretWhileSearchIsPendingCancelsAutomaticNavigation() {
         CodeEdit edit; edit.resize(700,300); edit.setPlainText("needle\nmanual selection\nneedle\n"); edit.show(); edit.showFind();

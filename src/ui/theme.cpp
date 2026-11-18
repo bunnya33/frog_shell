@@ -250,14 +250,16 @@ QWidget[frameRole="transfer"] { background:%2; border:1px solid transparent; bor
 QWidget[frameRole="section"] { border-bottom:1px solid %3; }
 QWidget[frameRole="find"] { background:%2; border:1px solid transparent; border-radius:4px; }
 )").arg(c.rail.name(),c.side.name(),c.divider.name());
-    sheet+=QString("QWidget[statusCard=\"true\"] {background:%1;} QTreeWidget[connectionList=\"true\"] QHeaderView::section {padding:6px 10px;} ").arg(c.background.name());
+    sheet+=QString("QWidget[statusCard=\"true\"] {background:%1;}").arg(c.background.name());
     sheet+=QString("QTreeView[sideTree=\"true\"] {background:%1;} QTreeView[sideTree=\"true\"] QHeaderView::section {background:%1;}").arg(c.side.name());
     sheet += QString(R"(
-QTableView[processTable="true"] { background:%1; alternate-background-color:%2; color:%3; border:0; }
-QTableView[processTable="true"]::item { border:0; padding:0 10px; }
+QTableView[processTable="true"], QTreeView[processTable="true"] { background:%1; alternate-background-color:%2; color:%3; border:0; }
+QTableView[processTable="true"]::item, QTreeView[processTable="true"]::item { border:0; padding:0 10px; }
 QTableView[processTable="true"]::item:selected,
-QTableView[processTable="true"]::item:selected:!active { background:%4; }
-QTableView[processTable="true"] QHeaderView { background:%5; border:0; }
+QTableView[processTable="true"]::item:selected:!active,
+QTreeView[processTable="true"]::item:selected,
+QTreeView[processTable="true"]::item:selected:!active { background:%4; }
+QTableView[processTable="true"] QHeaderView, QTreeView[processTable="true"] QHeaderView { background:%5; border:0; }
 )").arg(c.processBody.name(), c.processAlternate.name(), c.text.name(), c.processSelection.name(),
         c.processHeader.name());
     UiZoom::instance().applicationSheet(sheet);

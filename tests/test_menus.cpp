@@ -357,7 +357,7 @@ class MenuTests : public QObject {
         QCOMPARE(capture([&]{w.terminalMenu(w.terminalManager->visualItemRect(item).center());}),layout);
         capture([&]{w.terminalMenu(w.terminalManager->visualItemRect(item).center());},{},[&](QMenu *m){action(m,"关闭终端")->trigger();});QCOMPARE(w.terminalCount(),count-1);QVERIFY(!w.terminals.contains(target));
         auto editor=w.editArea->groups().first();auto fileMenu=capture([&]{emit editor->tabBar()->customContextMenuRequested(editor->tabBar()->tabRect(0).center());});
-        QCOMPARE(fileMenu,QString("关闭;关闭其他;关闭右侧;关闭已保存;全部关闭;|;移动到另一个编辑组;移到独立窗口").split(';'));
+        QCOMPARE(fileMenu,QString("关闭;关闭其他;关闭右侧;关闭已保存;全部关闭;|;打开文本对比;格式化 JSON;移动到另一个编辑组;移到独立窗口").split(';'));
         auto split=editor->findChild<QToolButton*>("splitEditorGroup");QVERIFY(split);QCOMPARE(split->menu()->actions().size(),2);for(auto a:split->menu()->actions())QVERIFY(!a->isSeparator());
         MainWindow window(true,std::make_shared<MenuSecrets>());window.resize(1280,850);window.show();settle();
         QCOMPARE(capture([&]{emit window.tabs->tabBar()->customContextMenuRequested(window.tabs->tabBar()->tabRect(1).center());}),QString("重新连接;|;关闭工作区").split(';'));

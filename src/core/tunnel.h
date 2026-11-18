@@ -19,6 +19,7 @@ struct TunnelRule {
     bool autoStart = false;
 };
 
+QVector<TunnelRule> loadAllTunnelRules(QString* error = nullptr);
 QVector<TunnelRule> loadTunnelRules(const QString& profileId, QString* error = nullptr);
 bool saveTunnelRules(const QString& profileId, const QVector<TunnelRule>& rules,
                      QString* error = nullptr);

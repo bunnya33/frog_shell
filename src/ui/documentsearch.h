@@ -15,6 +15,7 @@ class AdvancedSearchDialog final : public QDialog {
     explicit AdvancedSearchDialog(QWidget *parent);
     SearchOptions options() const;
     void setSource(const SearchSource &source);
+    void seedQuery(const QString &text);
     void setFeedback(const QString &message, bool error = false);
     void focusQuery();
   signals:

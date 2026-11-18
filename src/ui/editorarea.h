@@ -14,6 +14,7 @@ class EditorArea : public QWidget {
     EditorTabs *groupFor(QWidget *page) const;
     void activatePage(QWidget *page);
     void addPage(QWidget *page, const QString &label, EditorTabs *target = nullptr);
+    void openComparison(Editor *source);
     void removePage(QWidget *page);
     bool movePage(QWidget *page, EditorTabs *target, DropZone zone = DropZone::Center, int index = -1);
     bool canSplit() const;

@@ -272,16 +272,24 @@ public:
 };
 } // namespace
 
-QVector<TunnelRule> loadTunnelRules(const QString& profileId, QString* error) {
+QVector<TunnelRule> loadAllTunnelRules(QString* error) {
     if (error) error->clear();
     QMutexLocker lock(&configMutex);
-    QVector<TunnelRule> all, result;
-    if (!textValid(profileId, 128) || !readRules(all)) {
+    QVector<TunnelRule> rules;
+    if (!readRules(rules)) {
         if (error) *error = "端口配置格式无效或无法读取";
         return {};
     }
-    for (const auto& r : all) if (r.profileId == profileId) result.append(r);
-    return result;
+    return rules;
+}
+QVector<TunnelRule> loadTunnelRules(const QString& profileId, QString* error) {
+    if (!textValid(profileId, 128)) {
+        if (error) *error = "端口配置格式无效或无法读取";
+        return {};
+    }
+    auto rules = loadAllTunnelRules(error);
+    rules.removeIf([&](const TunnelRule &rule) { return rule.profileId != profileId; });
+    return rules;
 }
 bool saveTunnelRules(const QString& profileId, const QVector<TunnelRule>& rules, QString* error) {
     if (error) error->clear();

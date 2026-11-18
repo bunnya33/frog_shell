@@ -38,9 +38,15 @@ class MainWindow : public QMainWindow {
     QTabWidget *tabs;
     QTreeWidget *groups;
     SafeTreeWidget *connections;
-    qreal connectionColumns[5]={180,260,110,80,110};
+    static constexpr int tunnelColumn = 5;
+    qreal connectionColumns[tunnelColumn + 1]={180,260,110,80,110,74};
     bool scalingColumns=false,customConnectionColumns=false;
     void fitConnectionColumns();
+    QHash<QString, std::optional<TunnelCounts>> connectionTunnels;
+    bool tunnelRulesReadable = true;
+    void trackWorkspaceTunnels(Workspace *workspace);
+    void updateConnectionTunnels(const QString &id, std::optional<TunnelCounts> counts);
+    void setConnectionTunnelCell(QTreeWidgetItem *item) const;
     QLabel *detail;
     QLabel *detailName;
     QWidget *detailFields;

@@ -3,6 +3,7 @@
 #include "uipreferences.h"
 #include "connectionnotice.h"
 #include "workspace.h"
+#include "editorcompare.h"
 #include "uploadconflictdialog.h"
 #include "roundedsurface.h"
 #include "sshprompts.h"
@@ -813,6 +814,8 @@ void Workspace::buildUi() {
     terminalManager->hide();
     bottomContents=new QStackedWidget;bottomContents->addWidget(termBody);
     portsPanel=new PortsPanel(profile.id);
+    connect(portsPanel,&PortsPanel::configurationChanged,this,&Workspace::tunnelCountsChanged);
+    connect(portsPanel,&PortsPanel::tunnelRunningChanged,this,&Workspace::tunnelCountsChanged);
     portsPanel->startGuard=[this]{return tunnelStartError();};
     bottomContents->addWidget(portsPanel);tl->addWidget(bottomContents,1);
     bottomContents->addWidget(servicesPanel);
@@ -2395,6 +2398,11 @@ void Workspace::detachPage(QWidget *p) {
 }
 void Workspace::closePage(QWidget *p) {
     if(OperationGate::locked())return;
+    if (auto comparison = qobject_cast<EditorCompare *>(p)) {
+        detachPage(comparison);
+        comparison->deleteLater();
+        return;
+    }
     if(p&&p->property("documentSearchResults").toBool()){emit searchPageCloseRequested();return;}
     if (p == processPage || p == listeningPage) {
         detachPage(p);
@@ -2459,7 +2467,7 @@ void Workspace::movePage(QWidget *p, EditorTabs *target) {
 void Workspace::floatPage(QWidget *p) {
     if(OperationGate::locked())return;
     if(p&&p->property("documentSearchResults").toBool()){emit searchPageFloatRequested();return;}
-    if (!p || floating.contains(p))
+    if (!p || qobject_cast<EditorCompare *>(p) || floating.contains(p))
         return;
     QString label = p == processPage ? QString("进程信息") : p==listeningPage ? QString("监听端口") : QString("文件");
     if (auto e = qobject_cast<Editor *>(p))
@@ -3409,6 +3417,7 @@ void Workspace::refreshTheme() {
             e->refreshFileIcon();
             updateEditorTitle(e);
         }
+    for (auto comparison : findChildren<EditorCompare *>()) comparison->refreshTheme();
     QTreeWidgetItemIterator it(files);
     for (; *it; ++it) {
         if ((*it)->data(0, ParentNavigationRole).toBool()) {

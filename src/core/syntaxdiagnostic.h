@@ -11,4 +11,10 @@ struct SyntaxDiagnostic {
 };
 SyntaxFormat syntaxFormatForPath(const QString &path);
 SyntaxDiagnostic checkSyntax(SyntaxFormat format, const QString &text);
+struct JsonFormatResult {
+    QString text;
+    SyntaxDiagnostic diagnostic;
+    bool tooLarge = false;
+};
+JsonFormatResult formatJson(const QString &text, qsizetype sizeLimit);
 }

@@ -79,7 +79,7 @@ class ProcessDelegate final : public QStyledItemDelegate {
 };
 class ProcessCard final : public QWidget {
   public:
-    explicit ProcessCard(QTableView *table,QWidget *header) {
+    explicit ProcessCard(QAbstractItemView *table,QWidget *header) {
         setProperty("processCard", true);
         installRoundedSurface(this,RoundedRole::Process);
         auto layout = new QVBoxLayout(this);
@@ -291,7 +291,7 @@ void ProcessTable::paintEvent(QPaintEvent *event) {
     QTableWidget::paintEvent(event);
     if(!compact&&!visibleProcessCount()) {QPainter p(viewport());p.setPen(colors().muted);p.drawText(viewport()->rect().adjusted(uiPx(12),0,-uiPx(12),0),Qt::AlignCenter,filter.isEmpty()?"暂无已采集进程":"没有匹配的已采集进程");}
 }
-QWidget *processCard(QTableView *table,QWidget *header) {
+QWidget *processCard(QAbstractItemView *table,QWidget *header) {
     return new ProcessCard(table,header);
 }
 } // namespace rs

@@ -181,6 +181,13 @@ bool PortsPanel::busy(const QString &id) const {
 int PortsPanel::activeCount() const {
     int count=0; for (const auto &r : model->values) if (running(r.id)||busy(r.id)) ++count; return count;
 }
+std::optional<TunnelCounts> PortsPanel::tunnelCounts() const {
+    if (!loaded) return std::nullopt;
+    TunnelCounts counts{0, int(model->values.size())};
+    for (const auto &rule : model->values)
+        if (running(rule.id)) ++counts.running;
+    return counts;
+}
 int PortsPanel::rowFor(const QString &id) const {
     for (int n=0;n<model->values.size();++n) if (model->values[n].id == id) return n;
     return draft && draft->id.isEmpty() ? int(model->values.size()) : -1;
@@ -201,8 +208,11 @@ bool PortsPanel::rememberEnabled(const QString &id, bool enabled) {
 }
 void PortsPanel::setRuleState(const QString &id, const QString &state, const QString &reason) {
     if (!rule(id)) return;
-    auto &value=runtime[id];value.state=state;value.reason=reason.left(1024);
+    auto &value=runtime[id];
+    const bool runningChanged = (value.state == "running") != (state == "running");
+    value.state=state;value.reason=reason.left(1024);
     if(state!="running")value.upload=value.download=0;
+    if (runningChanged) emit tunnelRunningChanged();
     if(draft && draft->id==id)syncDraftState();
     if (pendingDelete.contains(id) && (state == "stopped" || state == "failed")) {
         pendingDelete.remove(id); auto candidate=model->values;

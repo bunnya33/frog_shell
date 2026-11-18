@@ -3,6 +3,7 @@
 #include "workspace.h"
 #include "sshprompts.h"
 namespace rs {
+std::optional<TunnelCounts> Workspace::tunnelCounts() const { return portsPanel->tunnelCounts(); }
 int Workspace::tunnelCount() const {
     QSet<QString> ids=wantedTunnels;
     for(const auto &rule:portsPanel->rules()) {

@@ -174,6 +174,16 @@ DocumentSearchController::DocumentSearchController(QWidget *parent):QObject(pare
     if(auto lock=AppLock::instance())connect(lock,&AppLock::lockedChanged,this,[this](bool value){if(value){cancelSearch();pendingActivation=-1;}});
 }
 DocumentSearchController::~DocumentSearchController(){cancelSearch();if(highlightedEditor)highlightedEditor->clearAdvancedSearch();}
+void AdvancedSearchDialog::seedQuery(const QString &text) {
+    if (text.isEmpty()) return;
+    if (text.size()>query->maxLength()) {
+        query->clear();
+        setFeedback("选中文字超过 512 字符，请缩短后再搜索。",true);
+        return;
+    }
+    regex->setChecked(false);
+    query->setText(text);
+}
 void DocumentSearchController::clearHighlights(){pendingActivation=-1;if(highlightedEditor)highlightedEditor->clearAdvancedSearch();highlightedEditor=nullptr;}
 void DocumentSearchController::publishHighlights(Editor *editor,const SearchOutcome &result){
     if(highlightedEditor)highlightedEditor->clearAdvancedSearch();
@@ -198,7 +208,7 @@ bool DocumentSearchController::openFor(QWidget *focus){auto editor=editorFromFoc
 bool DocumentSearchController::openFor(Workspace *workspace,Editor *editor) {
     if(OperationGate::locked()||!workspace||workspaceFor(editor)!=workspace)return false;
     cancelSearch();captured={workspace->profile.id,workspace->profile.credentialKey(),workspace->profile.identity(),editor->path,editor,editor->code->document()};
-    dialog->setSource(captured);dialog->setFeedback({});dialog->show();if(dialog->isMinimized())dialog->showNormal();keepWindowOnScreen(dialog);dialog->raise();dialog->activateWindow();dialog->focusQuery();return true;
+    dialog->setSource(captured);dialog->setFeedback({});dialog->seedQuery(editor->code->selectedSearchText());dialog->show();if(dialog->isMinimized())dialog->showNormal();keepWindowOnScreen(dialog);dialog->raise();dialog->activateWindow();dialog->focusQuery();return true;
 }
 void DocumentSearchController::registerWorkspace(Workspace *workspace) {
     if(!workspace||workspaces.contains(workspace))return;workspaces.append(workspace);

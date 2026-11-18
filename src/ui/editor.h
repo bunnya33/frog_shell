@@ -15,6 +15,7 @@ class CodeEdit : public EditorSurface {
   public:
     explicit CodeEdit(QWidget *parent = nullptr);
     void showFind(bool replace = false);
+    QString selectedSearchText() const;
     void refreshTheme();
     void setSyntaxPath(const QString &path);
     void setAdvancedSearch(const SearchOutcome &result);
@@ -114,6 +115,7 @@ class Editor : public QWidget {
     void setPath(const QString &path);
     void setReturnAction(QAction *action);
     void refreshFileIcon();
+    void formatJsonDocument();
   signals:
     void saveRequested(Editor *editor, bool overwrite);
     void changed();
@@ -123,7 +125,7 @@ class Editor : public QWidget {
 
   private:
     QString serverId, draftPath;
-    bool crlf = false, bom = false;
+    bool crlf = false, bom = false, formattingJson = false;
     QLabel *pathLabel, *formatLabel, *syntaxLabel = nullptr, *pathIcon = nullptr;
     QHBoxLayout *tools;
     QToolButton *returnButton = nullptr;
@@ -139,6 +141,7 @@ class EditorTabs : public PanelTabs {
     void closeEditor(QWidget *page);
     void moveEditor(QWidget *page);
     void floatEditor(QWidget *page);
+    void compareEditor(Editor *editor);
     void dragRequested(QWidget *page);
     void interactionFinished();
 

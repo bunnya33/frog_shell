@@ -5,6 +5,10 @@
 namespace rs {
 class PortsModel;
 class PortsDelegate;
+struct TunnelCounts {
+    int running = 0;
+    int total = 0;
+};
 // Owns configuration and its single edit row. Runtime ownership stays with Workspace.
 class PortsPanel : public QWidget {
     Q_OBJECT
@@ -15,6 +19,7 @@ class PortsPanel : public QWidget {
     std::optional<TunnelRule> rule(const QString &id) const;
     QString state(const QString &id) const;
     int activeCount() const;
+    std::optional<TunnelCounts> tunnelCounts() const;
     bool hasDraft() const { return draft.has_value(); }
     std::function<QString()> startGuard;
     void setRuleState(const QString &id, const QString &state, const QString &reason = {});
@@ -30,6 +35,7 @@ class PortsPanel : public QWidget {
     void stopRequested(const QString &id);
     void restartRequested(const rs::TunnelRule &rule);
     void configurationChanged();
+    void tunnelRunningChanged();
   protected:
     bool eventFilter(QObject *, QEvent *) override;
     void resizeEvent(QResizeEvent *) override;

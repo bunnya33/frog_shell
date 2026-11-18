@@ -5,6 +5,7 @@
 #include "../src/ui/theme.h"
 #include <QtTest>
 #include "../src/ui/editorlexer.h"
+#include "../src/ui/editorcompare.h"
 #include <memory>
 namespace rs {
 class ClosePositionStyle final : public QProxyStyle {
@@ -237,6 +238,201 @@ class EditorAreaTests : public QObject {
         QVERIFY(document.isNull());
         QVERIFY(highlighter.isNull());
         applyTheme(false);
+    }
+    void editorMinimapTracksNavigation() {
+        Editor editor("minimap-fixture","/summary.js",QByteArray("const status = true;\n// preview\n").repeated(300),{});
+        editor.resize(850,500);
+        editor.show();
+        auto minimap = editor.findChild<QWidget *>("editorMinimap");
+        QVERIFY(minimap);
+        QTRY_VERIFY(minimap->width()>50);
+        QTest::qWait(170);
+        QTest::mouseClick(minimap,Qt::LeftButton,{},QPoint(minimap->width()/2,minimap->height()*3/4));
+        QVERIFY(editor.code->send(SCI_GETFIRSTVISIBLELINE)>350);
+        const auto snapshot = editor.code->send(SCI_GETFIRSTVISIBLELINE);
+        QTest::mousePress(minimap,Qt::LeftButton,{},QPoint(minimap->width()/2,minimap->height()*3/4));
+        QMouseEvent move(QEvent::MouseMove,QPoint(30,40),minimap->mapToGlobal(QPoint(30,40)),Qt::NoButton,Qt::LeftButton,Qt::NoModifier);
+        QApplication::sendEvent(minimap,&move);
+        QTest::mouseRelease(minimap,Qt::LeftButton,{},QPoint(30,40));
+        QVERIFY(editor.code->send(SCI_GETFIRSTVISIBLELINE)<snapshot);
+        save(&editor,"document-minimap");
+        editor.resize(300,500);
+        QTRY_COMPARE(minimap->width(),0);
+    }
+    void jsonTabFormattingKeepsDraftAndTokenSpelling() {
+        EditorArea area;
+        area.resize(820,500);
+        area.show();
+        const QByteArray input = R"json({"z":1e+03,"z":9007199254740993,"a":[{"s":"a,  b\\n"}], "b":{}})json";
+        const QByteArray expected = R"json({
+    "z": 1e+03,
+    "z": 9007199254740993,
+    "a": [
+        {
+            "s": "a,  b\\n"
+        }
+    ],
+    "b": {}
+})json";
+        auto json = new Editor("format-fixture","/sample.JSON",input,"initial-hash");
+        area.addPage(json,"sample.JSON");
+        auto group = area.groupFor(json);
+        auto tabBar = group->tabBar();
+        bool invoked = false;
+        QTimer::singleShot(0,&area,[&] {
+            auto menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+            if (!menu) return;
+            for (auto action : menu->actions()) {
+                if (action->text()=="格式化 JSON") { action->trigger(); invoked=true; break; }
+            }
+            menu->close();
+        });
+        QSignalSpy saveRequest(json,&Editor::saveRequested);
+        emit tabBar->customContextMenuRequested(tabBar->tabRect(group->indexOf(json)).center());
+        QVERIFY(invoked);
+        QTRY_COMPARE(json->bytes(),expected);
+        QVERIFY(json->dirty());
+        QCOMPARE(saveRequest.count(),0);
+        QCOMPARE(json->remoteHash,QByteArray("initial-hash"));
+        save(json,"json-format-draft");
+        json->code->undo();
+        QCOMPARE(json->bytes(),input);
+        QVERIFY(!json->dirty());
+        const auto invalid = formatJson(QStringLiteral("{\"x\":1,}"),1024);
+        QVERIFY(invalid.diagnostic.error);
+        QVERIFY(invalid.text.isEmpty());
+    }
+    void compareTabAlignsChangesAndTracksSource() {
+        Workspace workspace(Profile{}, {}, true);
+        workspace.resize(1470,680);
+        workspace.show();
+        auto area = workspace.editArea;
+        area->mergeAll();
+        settle();
+        QString input = "first\nconst count = 12;\nanchor\nremoved\nlast\n";
+        for (int i=0; i<60; ++i) input += QString("shared line %1\n").arg(i);
+        auto editor = new Editor("compare-fixture","/settings.js",input.toUtf8(),{});
+        area->addPage(editor,"settings.js");
+        const int groups = int(area->groups().size());
+        auto originalGroup = area->groupFor(editor);
+        QVERIFY(originalGroup);
+        auto tabBar = originalGroup->tabBar();
+        bool invoked = false;
+        QTimer::singleShot(0,&workspace,[&] {
+            auto menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+            if (!menu) return;
+            for (auto action : menu->actions()) {
+                if (action->text()=="打开文本对比") { action->trigger(); invoked=true; break; }
+            }
+            menu->close();
+        });
+        emit tabBar->customContextMenuRequested(tabBar->tabRect(originalGroup->indexOf(editor)).center());
+        QVERIFY(invoked);
+        QCOMPARE(area->groups().size(),groups);
+        auto compare = area->findChild<EditorCompare *>();
+        QVERIFY(compare && compare->isVisible());
+        QCOMPARE(area->groupFor(editor),originalGroup);
+        QCOMPARE(area->groupFor(compare),originalGroup);
+        workspace.floatPage(compare);
+        QCOMPARE(area->groupFor(compare),originalGroup);
+        area->openComparison(editor);
+        QCOMPARE(area->findChildren<EditorCompare *>().size(),1);
+        auto left = compare->findChild<EditorSurface *>("compareLeft");
+        auto right = compare->findChild<EditorSurface *>("compareRight");
+        auto status = compare->findChild<QLabel *>("compareStatus");
+        auto overview = compare->findChild<QWidget *>("compareOverview");
+        QVERIFY(overview && overview->isVisible());
+        QVERIFY(!compare->findChild<QWidget *>("comparePaste"));
+        QVERIFY(!compare->findChild<QWidget *>("compareOpen"));
+        QVERIFY(!compare->findChild<QWidget *>("compareEditRight"));
+        QVERIFY(left->isReadOnly());
+        QVERIFY(!right->isReadOnly());
+        auto clipboard = QApplication::clipboard();
+        const auto originalClipboard = clipboard->text();
+        const auto other = QString("intro\n")+QString(input).replace("12;","53;")
+            .replace("first\n","first\ninserted\n").replace("removed\n","")
+            .replace("shared line 50\n","changed line 50\n");
+        clipboard->setText(other);
+        QTest::keyClick(right,Qt::Key_V,Qt::ControlModifier);
+        QTRY_VERIFY(status->text().contains("处差异"));
+        QCOMPARE(left->toPlainText(),input);
+        QCOMPARE(right->toPlainText(),other);
+        QCOMPARE(left->send(SCI_VISIBLEFROMDOCLINE,1),2);
+        QCOMPARE(right->send(SCI_ANNOTATIONGETLINES,4),1);
+        QCOMPARE(left->blockBoundingGeometry(left->document()->findBlockByNumber(1)).top()+left->viewport()->mapTo(compare,QPoint()).y(),
+                 right->blockBoundingGeometry(right->document()->findBlockByNumber(3)).top()+right->viewport()->mapTo(compare,QPoint()).y());
+        const auto number = right->fromUtf16(right->toPlainText().indexOf("53"));
+        QVERIFY(right->send(SCI_INDICATORALLONFOR,number)!=0);
+
+        right->send(SCI_SETSEL,number,number+2);
+        QTest::keyClicks(right,"84");
+        const auto edited = QString(other).replace("53;","84;");
+        const auto caret = right->send(SCI_GETCURRENTPOS);
+        QTRY_VERIFY(right->send(SCI_INDICATORALLONFOR,number)!=0);
+        QCOMPARE(right->toPlainText(),edited);
+        QCOMPARE(right->send(SCI_GETCURRENTPOS),caret);
+        right->undo();
+        right->undo();
+        QTRY_COMPARE(right->toPlainText(),other);
+        QTRY_VERIFY(right->send(SCI_INDICATORALLONFOR,number)!=0);
+        right->selectAll();
+        right->copy();
+        QCOMPARE(clipboard->text(),other);
+
+        QTest::mouseClick(overview,Qt::LeftButton,{},QPoint(overview->width()/2,overview->height()*4/5));
+        QVERIFY(right->send(SCI_GETFIRSTVISIBLELINE)>15);
+        QCOMPARE(right->send(SCI_GETFIRSTVISIBLELINE),left->send(SCI_GETFIRSTVISIBLELINE)+1);
+        QTest::keyClick(overview,Qt::Key_Home);
+        QCOMPARE(left->send(SCI_GETFIRSTVISIBLELINE),0);
+        QCOMPARE(right->send(SCI_GETFIRSTVISIBLELINE),0);
+        right->send(SCI_SETSEL,number,number);
+
+        left->setFocus();
+        QTest::keyClick(left,Qt::Key_A);
+        auto hint = left->findChild<QLabel *>("compareReadOnlyMessage");
+        QVERIFY(hint && hint->isVisible());
+        QCOMPARE(hint->text(),QString("无法在只读编辑器中编辑"));
+        QCOMPARE(left->toPlainText(),input);
+        save(compare,"side-by-side-read-only-hint");
+        right->setFocus();
+        QTRY_VERIFY(!hint->isVisible());
+        left->setFocus();
+        QTest::keyClick(left,Qt::Key_V,Qt::ControlModifier);
+        QVERIFY(hint->isVisible());
+        QCOMPARE(left->toPlainText(),input);
+        left->clearFocus();
+        right->setFocus();
+        left->setFocus();
+        QInputMethodEvent ime;
+        ime.setCommitString(QStringLiteral("文本"));
+        QApplication::sendEvent(left,&ime);
+        QVERIFY(hint->isVisible());
+        QCOMPARE(left->toPlainText(),input);
+        left->selectAll();
+        left->copy();
+        QCOMPARE(clipboard->text(),input);
+        clipboard->setText(originalClipboard);
+        left->send(SCI_SETSEL,0,0);
+        right->setFocus();
+        QTRY_VERIFY(!hint->isVisible());
+        save(compare,"side-by-side-compare-dark");
+        applyTheme(true);
+        compare->refreshTheme();
+        save(compare,"side-by-side-compare-light");
+        applyTheme(false);
+        editor->code->setPlainText(other);
+        QTRY_COMPARE(status->text(),QString("内容一致"));
+        QTRY_COMPARE(left->toPlainText(),other);
+        right->selectAll();
+        QTest::keyClick(right,Qt::Key_Delete);
+        QTRY_VERIFY(status->text().contains("处差异"));
+        QVERIFY(right->toPlainText().isEmpty());
+        QVERIFY(!right->isReadOnly());
+        QPointer<EditorCompare> guarded = compare;
+        workspace.closePage(compare);
+        QTRY_VERIFY(guarded.isNull());
+        QTRY_COMPARE(area->groups().size(),groups);
+        QCOMPARE(editor->code->toPlainText(),other);
     }
     void groupButtonsTargetTheirOwnGroup() {
         EditorArea area;

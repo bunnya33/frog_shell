@@ -254,6 +254,13 @@ class AppearanceTests : public QObject {
     void connectionEnvironmentBadges_data(){ansiAndDefaultEnhancement_data();}
     void connectionEnvironmentBadges(){
         QFETCH(bool,light);applyTheme(light);
+        TunnelRule active, saved;
+        active.profileId=saved.profileId="native-preview";
+        active.localPort=18131;active.remotePort=8131;
+        saved.localPort=18132;saved.remotePort=8132;saved.autoStart=true;
+        const auto previousRules=loadTunnelRules(active.profileId);
+        QVERIFY(saveTunnelRules(active.profileId,{active,saved}));
+        const auto restoreRules=qScopeGuard([&]{saveTunnelRules(active.profileId,previousRules);});
         MainWindow window(true,std::make_shared<FontMemorySecrets>());window.resize(1440,900);window.show();settle();
         auto workspace=window.workspaces.begin().value();QVERIFY(!workspace->session);
         window.profiles={workspace->profile};window.profiles[0].name="测试服务器";window.profiles[0].environment="测试";
@@ -263,6 +270,17 @@ class AppearanceTests : public QObject {
         workspace->online=true;window.refresh();window.tabs->setCurrentIndex(0);settle();
         auto current=window.connections->topLevelItem(0);QCOMPARE(current->text(4),QString("已连接"));
         QCOMPARE(current->data(4,ConnectionStateRole).toInt(),int(ConnectionState::Connected));
+        const int tunnelColumn=window.connections->columnCount()-1;
+        QCOMPARE(window.connections->headerItem()->text(tunnelColumn),QString("隧道"));
+        QCOMPARE(current->text(tunnelColumn),QString("0/2"));
+        QCOMPARE(window.connections->topLevelItem(1)->text(tunnelColumn),QString("0/0"));
+        QVERIFY(window.connections->alternatingRowColors());
+        QVERIFY(window.connections->parentWidget()->property("processCard").toBool());
+        QVERIFY(window.connections->parentWidget()->findChild<QWidget *>("roundedSurfaceBorder"));
+        workspace->portsPanel->setRuleState(active.id,"connecting");
+        QCOMPARE(current->text(tunnelColumn),QString("0/2"));
+        workspace->portsPanel->setRuleState(active.id,"running");
+        QCOMPARE(current->text(tunnelColumn),QString("1/2"));
         window.connections->setCurrentItem(window.connections->topLevelItem(1));
         current->setSelected(true); // Exercise connected/pending colors on selection too.
         for(int level:{0,2}){
@@ -284,6 +302,21 @@ class AppearanceTests : public QObject {
         window.connections->setColumnWidth(3,uiPx(44));window.connections->setColumnWidth(4,uiPx(56));
         window.connections->horizontalScrollBar()->setValue(window.connections->horizontalScrollBar()->maximum());settle();
         QVERIFY(window.connections->grab().save(report+QString("/connection-badges-narrow-%1.png").arg(light?"light":"dark")));
+        workspace->portsPanel->setRuleState(active.id,"stopping");
+        QCOMPARE(current->text(tunnelColumn),QString("0/2"));
+        QVERIFY(workspace->portsPanel->ensureMapping("127.0.0.1",8133));
+        QCOMPARE(current->text(tunnelColumn),QString("0/3"));
+        const auto offlineId=window.profiles[1].id;
+        QTimer::singleShot(0,&window,[&] {
+            if (auto dialog=qobject_cast<QDialog *>(QApplication::activeModalWidget())) {
+                if (auto panel=dialog->findChild<PortsPanel *>())
+                    panel->ensureMapping("127.0.0.1",8134);
+                dialog->reject();
+            }
+        });
+        window.configurePorts(offlineId);
+        QCOMPARE(window.connections->topLevelItem(1)->text(tunnelColumn),QString("0/1"));
+        QVERIFY(saveTunnelRules(offlineId,{}));
         workspace->online=false;
     }
     void redesignProductionEvidence_data(){ansiAndDefaultEnhancement_data();}

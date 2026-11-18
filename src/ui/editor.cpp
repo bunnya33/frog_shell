@@ -1,5 +1,6 @@
 #include "messagebox.h"
 #include "editor.h"
+#include "editorcompare.h"
 #include "theme.h"
 #include "icons.h"
 #include "fileicons.h"
@@ -7,6 +8,9 @@
 #include "windowstyle.h"
 #include "contentfont.h"
 #include "editorlexer.h"
+#include "editorminimap.h"
+#include "../core/editorlimits.h"
+#include "../core/operationgate.h"
 namespace rs {
 namespace {
 constexpr int kSyntaxLimit = 1024 * 1024;
@@ -549,8 +553,20 @@ void CodeEdit::wheelEvent(QWheelEvent *event) {
 }
 int CodeEdit::gutterWidth() const { return int(send(SCI_GETMARGINWIDTHN, 0)); }
 void CodeEdit::updateGutter() { refreshFont(); }
+QString CodeEdit::selectedSearchText() const {
+    const int start = int(send(SCI_GETSELECTIONSTART));
+    const int end = int(send(SCI_GETSELECTIONEND));
+    // Read the original newlines and whitespace, including tabs and Unicode.
+    return start < end ? QString::fromUtf8(byteRange(start, end)) : QString();
+}
 void CodeEdit::showFind(bool replace) {
+    const QString seed = replace ? QString() : selectedSearchText();
     ensureFindPanel();
+    if (!seed.isEmpty() && (selectionOwner != SelectionOwner::Find || query->text().isEmpty())) {
+        const QSignalBlocker querySignals(query), regexSignals(findRegex);
+        findRegex->setChecked(false);
+        query->setText(seed);
+    }
     replaceRow->setVisible(replace);
     findToggle->setIcon(icon(replace?Icon::ChevronDown:Icon::ChevronRight));
     findPanel->show();
@@ -638,7 +654,14 @@ Editor::Editor(const QString &sid, const QString &p, const QByteArray &raw, cons
     code = new CodeEdit;
     code->setPlainText(content);
     code->document()->setModified(false);
-    l->addWidget(code, 1);
+    auto editorBody = new QWidget;
+    auto editorLayout = new QHBoxLayout(editorBody);
+    editorLayout->setContentsMargins(0,0,0,0);
+    editorLayout->setSpacing(0);
+    editorLayout->addWidget(code,1);
+    editorLayout->addWidget(new EditorMinimap(code,editorBody));
+    editorBody->setFocusProxy(code);
+    l->addWidget(editorBody, 1);
     formatLabel = new QLabel(invalid ? "非 UTF-8 文件 · 只读预览，请下载后选择编码"
                                      : QString("UTF-8%1 · %2").arg(bom ? " BOM" : "", crlf ? "CRLF" : "LF"));
     UiZoom::instance().bind(formatLabel,"margin",[this]{formatLabel->setContentsMargins(uiPx(12),0,uiPx(10),0);});
@@ -714,6 +737,54 @@ void Editor::refreshFileIcon() {
     const auto image = FileIconProvider::file(path);
     setWindowIcon(image);
     pathIcon->setPixmap(image.pixmap(uiSize(18,18), devicePixelRatioF()));
+}
+void Editor::formatJsonDocument() {
+    if (OperationGate::locked() || formattingJson || code->isReadOnly() ||
+        syntaxFormatForPath(path) != SyntaxFormat::Json) return;
+    const auto lockToken = OperationGate::token();
+    const int revision = code->document()->revision();
+    const QString snapshot = code->toPlainText(), originalPath = path;
+    const auto limit = qsizetype(editorlimits::sizeBytes());
+    const auto result = std::make_shared<JsonFormatResult>();
+    syntaxLabel->setText("正在格式化 JSON…");
+    formattingJson = true;
+    auto worker = QThread::create([snapshot,limit,result] {
+        *result = rs::formatJson(snapshot,limit);
+    });
+    connect(worker,&QThread::finished,this,[this,result,revision,originalPath,lockToken,snapshot] {
+        formattingJson = false;
+        if (!OperationGate::accepts(lockToken) || code->document()->revision()!=revision || path!=originalPath) {
+            if (syntaxLabel->text()=="正在格式化 JSON…") syntaxLabel->clear();
+            return;
+        }
+        if (result->diagnostic.error) {
+            const auto &error = result->diagnostic;
+            syntaxLabel->setText(QString("无法格式化 · 第 %1 行，第 %2 列").arg(error.line).arg(error.column));
+            AppMessageBox::warning(this,"无法格式化 JSON",
+                QString("第 %1 行，第 %2 列\n%3").arg(error.line).arg(error.column).arg(error.message));
+            return;
+        }
+        if (result->tooLarge) {
+            syntaxLabel->setText("格式化结果超出编辑大小限制");
+            return;
+        }
+        if (result->text==snapshot) {
+            syntaxLabel->setText("JSON 格式无需调整");
+            return;
+        }
+        auto cursor = code->textCursor();
+        const int originalPosition = cursor.position();
+        const auto firstVisible = code->send(SCI_GETFIRSTVISIBLELINE);
+        cursor.beginEditBlock();
+        cursor.select(QTextCursor::Document);
+        cursor.insertText(result->text);
+        cursor.endEditBlock();
+        cursor.setPosition(originalPosition);
+        code->setTextCursor(cursor);
+        code->send(SCI_SETFIRSTVISIBLELINE,firstVisible);
+    });
+    connect(worker,&QThread::finished,worker,&QObject::deleteLater);
+    worker->start();
 }
 bool Editor::event(QEvent *event) {
     const auto handled = QWidget::event(event);
@@ -816,14 +887,28 @@ EditorTabs::EditorTabs(QWidget *parent) : PanelTabs(parent) {
         menu.addAction("关闭已保存", this, [closeMatching] { closeMatching(2); });
         menu.addAction("全部关闭", this, [closeMatching] { closeMatching(3); });
         menu.addSeparator();
+        if (auto editor = qobject_cast<Editor *>(page.data())) {
+            QPointer<Editor> source(editor);
+            menu.addAction(icon(Icon::SplitHorizontal), "打开文本对比", this, [this, source] {
+                if (source) emit compareEditor(source);
+            });
+            if (syntaxFormatForPath(editor->path) == SyntaxFormat::Json && !editor->code->isReadOnly()) {
+                menu.addAction(icon(Icon::ReplaceAll), "格式化 JSON", this, [this, source] {
+                    if (!source || OperationGate::locked()) return;
+                    setCurrentWidget(source);
+                    source->formatJsonDocument();
+                });
+            }
+        }
         menu.addAction("移动到另一个编辑组", this, [this, page] {
             if (page)
                 emit moveEditor(page);
         });
-        menu.addAction("移到独立窗口", this, [this, page] {
-            if (page)
-                emit floatEditor(page);
-        });
+        if (!qobject_cast<EditorCompare *>(page.data())) {
+            menu.addAction("移到独立窗口", this, [this, page] {
+                if (page) emit floatEditor(page);
+            });
+        }
         menuOpen = true;
         menu.exec(tabBar()->mapToGlobal(p));
         menuOpen = false;

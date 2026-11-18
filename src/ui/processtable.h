@@ -34,6 +34,6 @@ class ProcessTable final : public QTableWidget {
     QString filter;
     void applyFilter();
 };
-QWidget *processCard(QTableView *table,QWidget *header=nullptr);
+QWidget *processCard(QAbstractItemView *table,QWidget *header=nullptr);
 QHeaderView *processHeader(bool compact,QWidget *parent);
 } // namespace rs
