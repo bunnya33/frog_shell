@@ -135,9 +135,10 @@ QWidget#breadcrumbs[uploadTarget="true"] { border:2px solid transparent; backgro
 QLineEdit[uploadTarget="true"] { border:2px solid %7; background:%1; }
 QLineEdit,QSpinBox,QComboBox { padding:6px 8px; border:1px solid %8; border-radius:5px; background:%1; color:%2; selection-background-color:%6; }
 QLineEdit:focus,QSpinBox:focus,QComboBox:focus { border-color:%7; }
-QWidget#findInputShell { background:%1; border:1px solid %8; border-radius:5px; }
-QWidget#findInputShell QLineEdit { background:transparent; border:0; padding:4px 6px; }
-QWidget#findInputShell QToolButton[findOption="true"] { padding:0; border-radius:4px; }
+QWidget#findInputShell { background:%1; border:1px solid %8; border-radius:4px; }
+QLineEdit#findQuery { background:transparent; border:0; padding:0 6px; }
+QLineEdit#findReplacement { padding:0 6px; }
+QToolButton[findOption="true"] { padding:0; border-radius:4px; }
 QLineEdit:disabled,QSpinBox:disabled,QComboBox:disabled { color:%5; background:%3; }
 QComboBox[styledCombo="true"] { padding:6px 30px 6px 10px; border:1px solid %8; border-radius:6px; background:%1; color:%2; }
 QComboBox[styledCombo="true"]:hover { border-color:%5; background:%3; }
@@ -157,8 +158,14 @@ QTabBar[panelTabBar="true"]::tab { border-bottom:0; }
 QTabBar::tab:selected { background:%1; color:%2; border-top-color:%7; }
 QTabBar::tab:hover { background:%6; }
 QTabBar::tab:focus { border-top-color:%7; color:%2; }
-QTabBar#bottomPanelTabs::tab { border-top:0; border-bottom:2px solid transparent; height:34px; }
-QTabBar#bottomPanelTabs::tab:selected { border-bottom-color:%7; }
+QWidget#terminalHeader { background:%4; border-bottom:1px solid %8; }
+QTabBar#bottomPanelTabs::tab { background:transparent; margin-top:2px; height:30px; padding:0 14px; border:1px solid transparent; border-radius:0; }
+QTabBar#bottomPanelTabs::tab:hover { background:%3; color:%2; border-top-left-radius:6px; border-top-right-radius:6px; }
+QTabBar#bottomPanelTabs::tab:selected { background:%1; color:%2; border-color:%8; border-bottom-color:%1; border-top-left-radius:6px; border-top-right-radius:6px; }
+QTreeWidget#terminalManager, QWidget#portsPanel { background:%1; }
+QTreeWidget#terminalManager::item { padding:0 2px; }
+QPushButton[emptyPortAction="true"] { padding:1px 8px; background:%6; border:1px solid %8; }
+QPushButton[emptyPortAction="true"]:enabled:hover { background:%3; border-color:%5; }
 QTabBar#serverTabs::tab { border-top:0; border-bottom:2px solid transparent; height:34px; }
 QTabBar#serverTabs::tab:selected { border-bottom-color:%7; }
 QWidget#editorGroupActions { background:transparent; border:0; }
@@ -248,7 +255,7 @@ QWidget[frameRole="footer"] { background:%2; }
 QWidget[frameRole="card"] { background:%2; border:1px solid transparent; border-radius:8px; }
 QWidget[frameRole="transfer"] { background:%2; border:1px solid transparent; border-radius:5px; }
 QWidget[frameRole="section"] { border-bottom:1px solid %3; }
-QWidget[frameRole="find"] { background:%2; border:1px solid transparent; border-radius:4px; }
+QWidget[frameRole="find"] { background:%2; border:1px solid transparent; border-radius:8px; }
 )").arg(c.rail.name(),c.side.name(),c.divider.name());
     sheet+=QString("QWidget[statusCard=\"true\"] {background:%1;}").arg(c.background.name());
     sheet+=QString("QTreeView[sideTree=\"true\"] {background:%1;} QTreeView[sideTree=\"true\"] QHeaderView::section {background:%1;}").arg(c.side.name());

@@ -5,6 +5,7 @@
 #include "icons.h"
 #include "fileicons.h"
 #include "layoutmetrics.h"
+#include "uipreferences.h"
 #include "windowstyle.h"
 #include "contentfont.h"
 #include "editorlexer.h"
@@ -14,6 +15,11 @@
 namespace rs {
 namespace {
 constexpr int kSyntaxLimit = 1024 * 1024;
+constexpr int kFindPanelWidth = 424;
+constexpr int kFindPanelMinWidth = 330;
+constexpr int kFindInputWidth = 170;
+constexpr int kFindRowHeight = 26;
+constexpr auto kFindGeometryKey = "editor/findPanelGeometry";
 // A single parse process-wide; a busy editor keeps no queued text snapshot.
 struct SyntaxScheduler {
     QObject receiver;
@@ -59,8 +65,9 @@ CodeEdit::CodeEdit(QWidget *p) : EditorSurface(p) {
         updateCursorOutline();
     };
     connect(this, &EditorSurface::selectionChanged, this, cursorChanged);
-    connect(&UiZoom::instance(), &UiZoom::changed, this, [this]{
-        updateGutter();if(findPanel){findPanel->setFixedWidth(qMax(uiPx(120),qMin(uiPx(520),width()-uiPx(24))));findPanel->adjustSize();findPanel->move(qMax(0,width()-findPanel->width()-uiPx(18)),uiPx(4));}
+    connect(&UiZoom::instance(), &UiZoom::changed, this, [this] {
+        updateGutter();
+        layoutFindPanel();
     });
 }
 void CodeEdit::ensureFindPanel() {
@@ -72,49 +79,103 @@ void CodeEdit::ensureFindPanel() {
     findPanel->setObjectName("side");
     findPanel->setFrameShape(QFrame::StyledPanel);
     setFrameRole(findPanel,"find");
-    auto l = new QVBoxLayout(findPanel);
-    uiMargins(l,6,4,6,4);
-    uiSpacing(l,3);
+    auto panelLayout = new QGridLayout(findPanel);
+    uiMargins(panelLayout,1,3,4,3);
+    uiSpacing(panelLayout,1);
+    findGrip = iconButton(Icon::Grip, "按住左右拖动查找框", findPanel);
+    findGrip->setObjectName("findDragHandle");
+    findGrip->setFocusPolicy(Qt::ClickFocus);
+    findGrip->setCursor(Qt::SizeAllCursor);
+    uiFixedSize(findGrip,10,kFindRowHeight);
+    uiIconSize(findGrip,8,16);
+    findGrip->installEventFilter(this);
+    panelLayout->addWidget(findGrip,0,0,Qt::AlignVCenter);
+    panelLayout->setColumnStretch(2,1);
     findTimer=new QTimer(this);findTimer->setSingleShot(true);findTimer->setInterval(100);
     connect(findTimer,&QTimer::timeout,this,&CodeEdit::updateMatches);
     auto row = new QHBoxLayout;
-    findToggle=iconButton(Icon::ChevronRight,"显示或隐藏替换");findToggle->setObjectName("findToggleReplace");row->addWidget(findToggle);
-    auto inputShell=new QWidget;inputShell->setObjectName("findInputShell");
-    auto inputLayout=new QHBoxLayout(inputShell);uiMargins(inputLayout,2,1,2,1);uiSpacing(inputLayout,0);
+    uiSpacing(row,3);
+    auto compactButton = [](QToolButton *button) {
+        uiFixedSize(button,22,22);
+        uiIconSize(button,16,16);
+        return button;
+    };
+    findToggle=iconButton(Icon::ChevronRight,"显示或隐藏替换");findToggle->setObjectName("findToggleReplace");
+    uiFixedSize(findToggle,13,kFindRowHeight);
+    uiIconSize(findToggle,14,14);
+    panelLayout->addWidget(findToggle,0,1,Qt::AlignVCenter);
+    auto inputShell = findInputShell = new QWidget;
+    inputShell->setObjectName("findInputShell");
+    uiFixedHeight(inputShell,kFindRowHeight);
+    auto inputLayout=new QHBoxLayout(inputShell);uiMargins(inputLayout,1,1,1,1);uiSpacing(inputLayout,0);
     query = new QLineEdit;
     query->setObjectName("findQuery");
     query->installEventFilter(this);
     query->setPlaceholderText("查找");
     query->setAccessibleName("查找文本");
-    inputLayout->addWidget(query,1);row->addWidget(inputShell,1);
-    auto option=[this,inputShell,inputLayout](const QString &text,const QString &name,const QString &tip){auto b=new QToolButton(inputShell);uiFixedSize(b,24,24);b->setText(text);b->setToolButtonStyle(Qt::ToolButtonTextOnly);b->setProperty("findOption",true);b->setCheckable(true);b->setObjectName(name);b->setToolTip(tip);b->setAccessibleName(tip);inputLayout->addWidget(b);connect(b,&QToolButton::toggled,this,[this]{scheduleFind();});return b;};
+    query->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
+    inputLayout->addWidget(query,1);
+    row->addWidget(inputShell,3);
+    auto option = [this, inputShell, inputLayout, compactButton](const QString &text, const QString &name, const QString &tip) {
+        auto button = compactButton(new QToolButton(inputShell));
+        button->setText(text);
+        button->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        button->setProperty("findOption",true);
+        button->setCheckable(true);
+        button->setObjectName(name);
+        button->setToolTip(tip);
+        button->setAccessibleName(tip);
+        inputLayout->addWidget(button);
+        connect(button,&QToolButton::toggled,this,[this]{scheduleFind();});
+        return button;
+    };
     findCase=option("Aa","findCaseSensitive","区分大小写 (Alt+C)");
     findWord=option("ab","findWholeWord","全字匹配 (Alt+W)");auto wholeFont=findWord->font();wholeFont.setUnderline(true);findWord->setFont(wholeFont);
     findRegex=option(".*","findRegex","使用正则表达式 (Alt+R)");
-    findStatus = new QLabel;findStatus->setObjectName("findStatus");row->addWidget(findStatus);
-    auto prev = iconButton(Icon::Up, "上一处", nullptr, IconSize::Toolbar, "Shift+Enter");
-    auto next = iconButton(Icon::Down, "下一处", nullptr, IconSize::Toolbar, "Enter");
-    auto close = iconButton(Icon::Close, "关闭查找", nullptr, IconSize::Toolbar, "Esc");
+    findStatus = new QLabel;
+    findStatus->setObjectName("findStatus");
+    findStatus->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
+    bindUiFont(findStatus,12);
+    row->addWidget(findStatus,2);
+    auto prev = compactButton(iconButton(Icon::Up, "上一处", nullptr, IconSize::Toolbar, "Shift+Enter"));
+    auto next = compactButton(iconButton(Icon::Down, "下一处", nullptr, IconSize::Toolbar, "Enter"));
+    auto close = compactButton(iconButton(Icon::Close, "关闭查找", nullptr, IconSize::Toolbar, "Esc"));
+    close->setObjectName("findClose");
     row->addWidget(prev);
     row->addWidget(next);
     row->addWidget(close);
-    l->addLayout(row);
+    panelLayout->addLayout(row,0,2);
     replaceRow = new QWidget;
     auto r = new QHBoxLayout(replaceRow);
     uiMargins(r,0,0,0,0);
-    r->addSpacing(uiPx(28));
+    uiSpacing(r,3);
     replacement = new QLineEdit;
     replacement->setObjectName("findReplacement");
     replacement->installEventFilter(this);
     replacement->setPlaceholderText("替换为");
+    uiFixedHeight(replacement,kFindRowHeight);
     r->addWidget(replacement);
-    preserveCase=new QToolButton;preserveCase->setObjectName("findPreserveCase");preserveCase->setText("AB");preserveCase->setCheckable(true);preserveCase->setToolTip("保留大小写");r->addWidget(preserveCase);
-    auto one = iconButton(Icon::Replace,"替换当前"), all = iconButton(Icon::ReplaceAll,"全部替换");one->setObjectName("findReplaceOne");all->setObjectName("findReplaceAll");
+    preserveCase=compactButton(new QToolButton);
+    preserveCase->setProperty("findOption",true);
+    preserveCase->setObjectName("findPreserveCase");preserveCase->setText("AB");preserveCase->setCheckable(true);preserveCase->setToolTip("保留大小写");r->addWidget(preserveCase);
+    auto one = compactButton(iconButton(Icon::Replace,"替换当前"));
+    auto all = compactButton(iconButton(Icon::ReplaceAll,"全部替换"));
+    one->setObjectName("findReplaceOne");all->setObjectName("findReplaceAll");
     r->addWidget(one);
     r->addWidget(all);
-    l->addWidget(replaceRow);
+    panelLayout->addWidget(replaceRow,1,2);
     replaceRow->hide();
+    findResizeHandle = new QWidget(findPanel);
+    findResizeHandle->setObjectName("findResizeHandle");
+    findResizeHandle->setAccessibleName("调整查找框宽度");
+    findResizeHandle->setFocusPolicy(Qt::ClickFocus);
+    findResizeHandle->setCursor(Qt::SizeHorCursor);
+    findResizeHandle->installEventFilter(this);
     findPanel->hide();
+    connect(&UiPreferences::instance(), &UiPreferences::defaultsRestored, findPanel, [this] {
+        loadFindGeometry();
+        layoutFindPanel();
+    });
     connect(close, &QToolButton::clicked, this, [this] {
         closeFind();
         setFocus();
@@ -122,7 +183,7 @@ void CodeEdit::ensureFindPanel() {
     connect(findToggle, &QToolButton::clicked, this, [this] {
         replaceRow->setVisible(!replaceRow->isVisible());
         findToggle->setIcon(icon(replaceRow->isVisible()?Icon::ChevronDown:Icon::ChevronRight));
-        findPanel->adjustSize();
+        layoutFindPanel();
     });
     connect(next, &QToolButton::clicked, this, [this] { locate(); });
     connect(prev, &QToolButton::clicked, this, [this] { locate(true); });
@@ -139,6 +200,51 @@ void CodeEdit::ensureFindPanel() {
     });
     auto previous = new QShortcut(QKeySequence(Qt::SHIFT | Qt::Key_Return), findPanel);
     connect(previous, &QShortcut::activated, this, [this] { locate(true); });
+}
+int CodeEdit::findPanelAvailableWidth() const {
+    return qMin(width(), qMax(uiPx(120), width() - uiPx(24)));
+}
+int CodeEdit::findPanelRightmostX() const {
+    return qMax(0, width() - findPanel->width() - uiPx(18));
+}
+void CodeEdit::setFindPanelWidth(int panelWidth) {
+    const int extraWidth = qMax(0, panelWidth - uiPx(kFindPanelWidth));
+    findInputShell->setMaximumWidth(uiPx(kFindInputWidth) + extraWidth);
+    findPanel->setFixedWidth(panelWidth);
+    findPanel->adjustSize();
+    findResizeHandle->setGeometry(0, 0, uiPx(4), findPanel->height());
+}
+void CodeEdit::layoutFindPanel() {
+    if (!findPanel) return;
+    const qreal available = uiBase(findPanelAvailableWidth());
+    setFindPanelWidth(uiPx(qMin(available, findPreferredWidth.value_or(kFindPanelWidth))));
+    findPanel->move(qRound(findHorizontalPosition * findPanelRightmostX()), uiPx(4));
+}
+void CodeEdit::loadFindGeometry() {
+    const auto geometry = QSettings().value(kFindGeometryKey).toMap();
+    const qreal savedWidth = geometry.value("width").toDouble();
+    const qreal savedPosition = geometry.value("position", 1.0).toDouble();
+    findPreferredWidth.reset();
+    if (qIsFinite(savedWidth) && savedWidth > 0) findPreferredWidth = savedWidth;
+    findHorizontalPosition = qIsFinite(savedPosition) ? qBound(0.0, savedPosition, 1.0) : 1.0;
+}
+void CodeEdit::finishFindDrag(bool resizing) {
+    if (resizing) {
+        if (!findResize) return;
+        findResize.reset();
+        findPanel->setProperty("findResizeDragging", false);
+    } else {
+        if (!findDragOffset) return;
+        findDragOffset.reset();
+        findGrip->setDown(false);
+    }
+    if (findGeometryChanged) {
+        QSettings().setValue(kFindGeometryKey, QVariantMap{
+            {"width", findPreferredWidth.value_or(kFindPanelWidth)},
+            {"position", findHorizontalPosition},
+        });
+        findGeometryChanged = false;
+    }
 }
 void CodeEdit::setSyntaxPath(const QString &path) {
     syntaxFormat = syntaxFormatForPath(path);
@@ -203,6 +309,81 @@ QRect CodeEdit::syntaxAnchorRect() const {
     return rect.adjusted(-2, 0, 8, 2);
 }
 bool CodeEdit::eventFilter(QObject *object,QEvent *event) {
+    if (object == findGrip || object == findResizeHandle) {
+        const bool resizing = object == findResizeHandle;
+        switch (event->type()) {
+        case QEvent::Enter:
+        case QEvent::Leave:
+            if (resizing) findPanel->setProperty("findResizeHovered", event->type() == QEvent::Enter);
+            break;
+        case QEvent::MouseButtonPress:
+        case QEvent::MouseButtonDblClick: {
+            const auto mouse = static_cast<QMouseEvent *>(event);
+            if (mouse->button() != Qt::LeftButton) break;
+            const int pointerX = mapFromGlobal(mouse->globalPosition().toPoint()).x();
+            findGeometryChanged = false;
+            if (resizing) {
+                findResize = FindResize{pointerX, findPanel->x() + findPanel->width(), findPanel->width()};
+                findPanel->setProperty("findResizeDragging", true);
+            } else {
+                findDragOffset = pointerX - findPanel->x();
+                findGrip->setDown(true);
+            }
+            return true;
+        }
+        case QEvent::MouseMove: {
+            const auto mouse = static_cast<QMouseEvent *>(event);
+            if (!mouse->buttons().testFlag(Qt::LeftButton)) break;
+            const int pointerX = mapFromGlobal(mouse->globalPosition().toPoint()).x();
+            if (resizing && findResize) {
+                const int rightEdge = qMin(findResize->rightEdge, width());
+                const int maxWidth = qMin(findPanelAvailableWidth(), rightEdge);
+                const int newWidth = qBound(qMin(uiPx(kFindPanelMinWidth), maxWidth),
+                                            findResize->width + findResize->pointerX - pointerX, maxWidth);
+                if (newWidth != findPanel->width()) {
+                    findGeometryChanged = true;
+                    findPreferredWidth = uiBase(newWidth);
+                    setFindPanelWidth(newWidth);
+                    const int x = rightEdge - newWidth;
+                    const int limit = findPanelRightmostX();
+                    if (limit > 0) findHorizontalPosition = qBound(0.0, qreal(x) / limit, 1.0);
+                    findPanel->move(x, findPanel->y());
+                }
+                return true;
+            }
+            if (!resizing && findDragOffset) {
+                const int limit = findPanelRightmostX();
+                const int x = qBound(0, pointerX - *findDragOffset, limit);
+                if (limit > 0 && x != findPanel->x()) {
+                    findGeometryChanged = true;
+                    findHorizontalPosition = qreal(x) / limit;
+                    findPanel->move(x, findPanel->y());
+                }
+                return true;
+            }
+            break;
+        }
+        case QEvent::MouseButtonRelease:
+            if (static_cast<QMouseEvent *>(event)->button() == Qt::LeftButton
+                && (resizing ? findResize.has_value() : findDragOffset.has_value())) {
+                finishFindDrag(resizing);
+                return true;
+            }
+            break;
+        case QEvent::Hide:
+            if (resizing) findPanel->setProperty("findResizeHovered", false);
+            Q_FALLTHROUGH();
+        case QEvent::UngrabMouse:
+            finishFindDrag(resizing);
+            break;
+        default:
+            break;
+        }
+    }
+    if (event->type() == QEvent::FocusIn && (object == query || object == replacement)) {
+        findGrip->setFocusProxy(static_cast<QWidget *>(object));
+        findResizeHandle->setFocusProxy(static_cast<QWidget *>(object));
+    }
     if (object == viewport() && event->type() == QEvent::ToolTip && syntaxResult.error) {
         auto help = static_cast<QHelpEvent *>(event);
         const int pos = cursorForPosition(help->pos()).position();
@@ -229,11 +410,16 @@ void CodeEdit::closeFind() {
     if (findTimer) findTimer->stop();
     ++findRevision;
     pendingFindNavigation = FindNavigation::None;
-    clearOwnedSelection(SelectionOwner::Find);
+    if (selectionOwner == SelectionOwner::Find) {
+        // Leave the cursor and its selection at the last match after closing.
+        selectionOwner = SelectionOwner::None;
+        ownedSelection = {};
+    }
     currentMatch = -1;
     matches.clear();
     searchSelection = false;
     updateHighlights();
+    updateCursorOutline();
 }
 void CodeEdit::scheduleFind(bool navigate) {
     ++findRevision;
@@ -255,7 +441,7 @@ void CodeEdit::scheduleFind(bool navigate) {
     if (query && query->text().isEmpty()) {
         pendingFindNavigation = FindNavigation::None;
         if (findTimer) findTimer->stop();
-        if (findStatus) findStatus->clear();
+        if (findStatus) setFindStatus("无结果");
         return;
     }
     if (findTimer) findTimer->start();
@@ -298,11 +484,11 @@ void CodeEdit::clearOwnedSelection(SelectionOwner owner) {
 void CodeEdit::updateMatches(){
     if(!findPanel||!findPanel->isVisible())return;
     if(findRunning)return;
-    if(query->text().isEmpty()){findStatus->clear();return;}
+    if(query->text().isEmpty()){setFindStatus("无结果");return;}
     const QString input=toPlainText(), needle=query->text();const bool regex=findRegex->isChecked(),whole=findWord->isChecked(),sensitive=findCase->isChecked();
-    if((regex&&input.size()>262144)||needle.size()>512){matches.clear();currentMatch=-1;updateHighlights();findStatus->setText("超出查找限制");return;}
+    if((regex&&input.size()>262144)||needle.size()>512){matches.clear();currentMatch=-1;updateHighlights();setFindStatus("超出查找限制");return;}
     const quint64 revision=findRevision;findRunning=true;
-    if(matches.isEmpty())findStatus->setText("查找中…");
+    if(matches.isEmpty())setFindStatus("查找中…");
     struct Result {QVector<Match> matches;QString error;};auto result=std::make_shared<Result>();
     auto worker=QThread::create([input,needle,regex,whole,sensitive,result]{
         QString pattern=regex?needle:QRegularExpression::escape(needle);
@@ -336,8 +522,8 @@ void CodeEdit::updateMatches(){
             match.byteStart=match.cursor.byteAnchor();match.byteEnd=match.cursor.bytePosition();
             if(match.byteStart==previousStart&&match.byteEnd==previousEnd)currentMatch=i;
         }
-        if(!result->error.isEmpty()){updateHighlights();findStatus->setText(result->error);return;}
-        if(matches.isEmpty()){updateHighlights();findStatus->setText("无结果");return;}
+        if(!result->error.isEmpty()){updateHighlights();setFindStatus(result->error);return;}
+        if(matches.isEmpty()){updateHighlights();setFindStatus("无结果");return;}
         const auto navigation = pendingFindNavigation;
         pendingFindNavigation = FindNavigation::None;
         if (navigation != FindNavigation::None) locate(navigation == FindNavigation::Backward);
@@ -357,7 +543,11 @@ void CodeEdit::updateMatches(){
 }
 void CodeEdit::paintMatches(){
     updateHighlights();
-    findStatus->setText(matches.isEmpty()?QString("无结果"):QString("%1 / %2").arg(currentMatch+1).arg(matches.size()));
+    setFindStatus(tr("第 %1 项，共 %2 项").arg(currentMatch+1).arg(matches.size()));
+}
+void CodeEdit::setFindStatus(const QString &text) {
+    findStatus->setText(text);
+    findStatus->setToolTip(text);
 }
 void CodeEdit::setAdvancedSearch(const SearchOutcome &result) {
     advancedRanges.clear(); advancedCurrent = {}; advancedCurrentRow = -1;
@@ -512,6 +702,10 @@ bool CodeEdit::event(QEvent *event) {
     const bool result = EditorSurface::event(event);
     switch (event->type()) {
     case QEvent::FocusIn:
+        // Keep keyboard focus where it was when Qt starts a pointer drag.
+        if (findGrip) findGrip->setFocusProxy(this);
+        if (findResizeHandle) findResizeHandle->setFocusProxy(this);
+        Q_FALLTHROUGH();
     case QEvent::FocusOut:
         updateCursorOutline();
         viewport()->update();
@@ -562,6 +756,7 @@ QString CodeEdit::selectedSearchText() const {
 void CodeEdit::showFind(bool replace) {
     const QString seed = replace ? QString() : selectedSearchText();
     ensureFindPanel();
+    if (!findPanel->isVisible()) loadFindGeometry();
     if (!seed.isEmpty() && (selectionOwner != SelectionOwner::Find || query->text().isEmpty())) {
         const QSignalBlocker querySignals(query), regexSignals(findRegex);
         findRegex->setChecked(false);
@@ -570,9 +765,7 @@ void CodeEdit::showFind(bool replace) {
     replaceRow->setVisible(replace);
     findToggle->setIcon(icon(replace?Icon::ChevronDown:Icon::ChevronRight));
     findPanel->show();
-    findPanel->setFixedWidth(qMax(uiPx(120),qMin(uiPx(520),width()-uiPx(24))));
-    findPanel->adjustSize();
-    findPanel->move(qMax(0, width() - findPanel->width() - uiPx(18)), uiPx(4));
+    layoutFindPanel();
     findPanel->raise();
     query->setFocus();
     query->selectAll();
@@ -594,10 +787,7 @@ void CodeEdit::locate(bool back) {
 void CodeEdit::resizeEvent(QResizeEvent *e) {
     EditorSurface::resizeEvent(e);
     updateGutter();
-    if (findPanel && findPanel->isVisible()) {
-        findPanel->setFixedWidth(qMax(uiPx(120),qMin(uiPx(520),width()-uiPx(24))));
-        findPanel->move(qMax(0, width() - findPanel->width() - uiPx(18)), uiPx(4));
-    }
+    if (findPanel && findPanel->isVisible()) layoutFindPanel();
     if (lineWrapMode() != NoWrap && (searchSelection || !advancedCurrent.isNull())) updateHighlights();
 }
 void CodeEdit::keyPressEvent(QKeyEvent *e) {

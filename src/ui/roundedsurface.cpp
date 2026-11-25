@@ -31,7 +31,9 @@ QRegion roundedPopupRegion(QRect bounds,qreal radius,qreal dpr) {
 }
 namespace {
 qreal radius(RoundedRole role) {
-    return uiReal(role==RoundedRole::Process||role==RoundedRole::Card?8:role==RoundedRole::Menu||role==RoundedRole::ComboPopup?6:role==RoundedRole::Find?4:5);
+    if (role == RoundedRole::Process || role == RoundedRole::Card || role == RoundedRole::Find) return uiReal(8);
+    if (role == RoundedRole::Menu || role == RoundedRole::ComboPopup) return uiReal(6);
+    return uiReal(5);
 }
 QColor border(RoundedRole role,QWidget *host) {
     const auto c=colors();
@@ -100,6 +102,16 @@ class Border final : public QWidget {
             p.fillPath(outside,underlay(host));
         }
         paintRoundedSurface(p,rect(),radius(role),Qt::transparent,border(role,host),width);
+        if (role == RoundedRole::Find) {
+            const bool dragging = host->property("findResizeDragging").toBool();
+            const bool hovering = host->property("findResizeHovered").toBool();
+            const QColor idle = lightTheme() ? QColor("#afb8c1") : QColor("#494b55");
+            const QColor hover = lightTheme() ? QColor("#4f84c4") : QColor("#626184");
+            const QColor active = lightTheme() ? colors().accent : colors().comment;
+            // Paint the strip on the outer contour so its ends follow the corners.
+            p.setClipRect(QRectF(0, 0, uiReal(dragging || hovering ? 3 : 2), height()));
+            p.fillPath(g.outside, dragging ? active : hovering ? hover : idle);
+        }
     }
   private:
     QWidget *host;

@@ -440,7 +440,7 @@ Workspace::Workspace(Profile p, std::optional<QByteArray> secret, bool demonstra
     connect(files,&FileView::internalMoveDropped,this,&Workspace::acceptInternalDrag);
     connect(&UiZoom::instance(),&UiZoom::changed,this,[this]{
         sizeTerminalManager();updateTerminalRowActions();
-        for(QTreeWidgetItemIterator it(terminalManager);*it;++it)if((*it)->data(0,Qt::UserRole).isValid())(*it)->setSizeHint(0,QSize(0,uiPx(28)));
+        for(QTreeWidgetItemIterator it(terminalManager);*it;++it)if((*it)->data(0,Qt::UserRole).isValid())(*it)->setSizeHint(0,QSize(0,uiPx(22)));
         if(terminals.contains(focusedTerm))currentTerminal->setText(currentTerminal->fontMetrics().elidedText(terminalLabel(terminals[focusedTerm],true),Qt::ElideRight,uiPx(200)).replace("&","&&"));
         if(entryDraft.editor && entryDraft.row.isValid())files->itemFromIndex(entryDraft.row)->setSizeHint(0,QSize(0,qMax(uiPx(40),entryDraft.editor->sizeHint().height()+uiPx(12))));
         QResizeEvent event(size(),size());resizeEvent(&event);
@@ -728,18 +728,25 @@ void Workspace::buildUi() {
     auto tl = new QVBoxLayout(terminalPanel);
     uiMargins(tl,0,0,0,0);
     uiSpacing(tl,0);
-    QHBoxLayout *terminalHead;
-    auto terminalBand=rowWidget(&terminalHead);terminalBand->setObjectName("terminalHeader");tl->addWidget(terminalBand);uiMargins(terminalHead,4,0,6,0);
+    auto terminalBand = new QWidget;
+    terminalBand->setObjectName("terminalHeader");
+    terminalBand->setAttribute(Qt::WA_StyledBackground);
+    bandHeight(terminalBand,34);
+    auto terminalHead = new QHBoxLayout(terminalBand);
+    uiMargins(terminalHead,3,0,4,0);
+    uiSpacing(terminalHead,3);
+    tl->addWidget(terminalBand);
     bottomTabs = new QTabBar;
     bottomTabs->setObjectName("bottomPanelTabs");bottomTabs->setExpanding(false);bottomTabs->setDrawBase(false);
     bottomTabs->setProperty("preservePortDraft",true);bottomTabs->addTab("终端");bottomTabs->addTab("端口");bottomTabs->addTab("服务");
-    terminalHead->addWidget(bottomTabs);
+    terminalHead->addWidget(bottomTabs,0,Qt::AlignBottom);
     terminalHead->addStretch();
     auto newTerm = iconButton(Icon::Add, "新建终端");
     splitTerminal = iconButton(Icon::SplitHorizontal, "拆分终端");
     closeCurrentTerminal = iconButton(Icon::Trash, "关闭终端");
     closeCurrentTerminal->setToolTip("关闭终端（结束会话）");
-    auto hide = iconButton(Icon::Collapse, "隐藏面板");
+    auto hide = iconButton(Icon::Close, "隐藏底部面板");
+    hide->setObjectName("hideBottomPanel");
     currentTerminal = iconButton(Icon::Terminal, "当前终端");
     currentTerminal->setObjectName("currentTerminal");
     currentTerminal->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
@@ -753,6 +760,22 @@ void Workspace::buildUi() {
     terminalActions=new QWidget;
     auto actionsLayout=new QHBoxLayout(terminalActions);uiMargins(actionsLayout,0,0,0,0);uiSpacing(actionsLayout,0);
     for (auto b : {newTerm, currentTerminal, splitTerminal, closeCurrentTerminal}) actionsLayout->addWidget(b);
+    auto terminalMore = iconButton(Icon::More, "更多终端操作");
+    terminalMore->setObjectName("terminalMore");
+    actionsLayout->addWidget(terminalMore);
+    connect(terminalMore,&QToolButton::clicked,this,[this,terminalMore] {
+        QMenu menu;
+        menu.addAction(icon(Icon::Add),"新建独立终端",this,[this]{addTerminal();});
+        if (terminals.contains(focusedTerm)) {
+            menu.addSeparator();
+            addTerminalMenuActions(menu, focusedTerm);
+        }
+        menu.exec(terminalMore->mapToGlobal(QPoint(0,terminalMore->height())));
+    });
+    for (auto b : {newTerm, splitTerminal, closeCurrentTerminal, terminalMore, maximizeTerminal, hide}) {
+        uiFixedSize(b,24,24);
+        uiIconSize(b,16,16);
+    }
     terminalHead->addWidget(terminalActions);
     servicesPanel=new ServicesPanel(profile.identity(),demo);
     servicesPanel->mutationGuard=[this]{return shuttingDown?QString("工作区正在关闭"):tunnelStartError();};
@@ -760,6 +783,11 @@ void Workspace::buildUi() {
     servicesPanel->directory=[this]{return directory;};
     connect(servicesPanel,&ServicesPanel::connectionRequested,this,&Workspace::ensureServices);
     terminalHead->addWidget(servicesPanel->toolbar);servicesPanel->toolbar->hide();
+    auto panelSeparator = new QWidget;
+    setFrameRole(panelSeparator,"divider");
+    uiFixedSize(panelSeparator,1,16);
+    terminalHead->addWidget(panelSeparator);
+    connect(bottomTabs,&QTabBar::currentChanged,panelSeparator,[panelSeparator](int index){panelSeparator->setVisible(index!=1);});
     for (auto b : {maximizeTerminal, hide}) {b->setProperty("preservePortDraft",true);terminalHead->addWidget(b);}
     auto termBody = new PanelSplitter;
     terminalStack = new QStackedWidget;
@@ -771,10 +799,10 @@ void Workspace::buildUi() {
     terminalManager->setColumnCount(2);terminalManager->header()->setStretchLastSection(false);
     terminalManager->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     terminalManager->header()->setSectionResizeMode(1, QHeaderView::Fixed);
-    UiZoom::instance().bind(terminalManager,"actionsColumn",[this]{terminalManager->header()->setMinimumSectionSize(uiPx(28));terminalManager->header()->resizeSection(1,uiPx(60));});
+    UiZoom::instance().bind(terminalManager,"actionsColumn",[this]{terminalManager->header()->setMinimumSectionSize(uiPx(22));terminalManager->header()->resizeSection(1,uiPx(44));});
     uiMaximumWidth(terminalManager,450);
     uiMinimumWidth(terminalManager,150);
-    UiZoom::instance().bind(terminalManager,"treeMetrics",[this]{terminalManager->setIndentation(uiPx(24));terminalManager->setIconSize(uiSize(18,18));});
+    UiZoom::instance().bind(terminalManager,"treeMetrics",[this]{terminalManager->setIndentation(uiPx(20));terminalManager->setIconSize(uiSize(16,16));});
     terminalManager->setSelectionMode(QAbstractItemView::SingleSelection);
     terminalManager->setSelectionBehavior(QAbstractItemView::SelectRows);
     terminalManager->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -791,7 +819,8 @@ void Workspace::buildUi() {
     rowClose->setToolTip("关闭终端（结束会话）");
     for (auto button : {rowSplit, rowClose}) {
         button->setFocusPolicy(Qt::NoFocus);
-        uiFixedSize(button,28,28);
+        uiFixedSize(button,20,20);
+        uiIconSize(button,16,16);
         rowActions->addWidget(button);
         connect(button, &QToolButton::pressed, this, [this, button] {
             button->setProperty("pressedTerminal", terminalRowId);
@@ -812,7 +841,11 @@ void Workspace::buildUi() {
     termBody->addWidget(terminalManager);
     termBody->setSizes({924,170});
     termBody->setStretchFactor(0, 1);termBody->setStretchFactor(1,0);
-    connect(termBody,&QSplitter::splitterMoved,this,[this]{if(!UiZoom::instance().changing()&&terminalManager->isVisible())terminalManagerBaseWidth=uiBase(terminalManager->width());});
+    connect(termBody,&QSplitter::splitterMoved,this,[this] {
+        if (UiZoom::instance().changing() || !terminalManager->isVisible()) return;
+        terminalManagerBaseWidth=uiBase(terminalManager->width());
+        showTerminalGridSizes();
+    });
     terminalManager->hide();
     bottomContents=new QStackedWidget;bottomContents->addWidget(termBody);
     portsPanel=new PortsPanel(profile.id);
@@ -833,6 +866,7 @@ void Workspace::buildUi() {
     verticalSplit->setStretchFactor(1, 1);
     connect(verticalSplit, &QSplitter::splitterMoved, this, [this] {
         if (restoringWorkspaceLayout || UiZoom::instance().changing() || terminalMaximized || terminalPanel->isHidden()) return;
+        showTerminalGridSizes();
         const auto sizes = verticalSplit->sizes();
         if (sizes.size() == 2 && sizes[0] + sizes[1] > 0) {
             savedTerminalRatio = qreal(sizes[1]) / (sizes[0] + sizes[1]);
@@ -1933,8 +1967,25 @@ bool Workspace::eventFilter(QObject *o, QEvent *e) {
         editDirectoryPath();
         return true;
     }
-    if (terminalManager && o == terminalManager->viewport() && (e->type() == QEvent::Paint || e->type() == QEvent::Resize))
-        updateTerminalRowActions();
+    if (terminalManager && o == terminalManager->viewport()) {
+        switch (e->type()) {
+        case QEvent::MouseMove:
+            terminalHoverPoint = static_cast<QMouseEvent *>(e)->position().toPoint();
+            updateTerminalRowActions();
+            break;
+        case QEvent::Leave:
+        case QEvent::Hide:
+            terminalHoverPoint = {-1,-1};
+            updateTerminalRowActions();
+            break;
+        case QEvent::Paint:
+        case QEvent::Resize:
+            updateTerminalRowActions();
+            break;
+        default:
+            break;
+        }
+    }
     if (o == entryDraft.editor) {
         if (e->type() == QEvent::KeyPress && static_cast<QKeyEvent *>(e)->key() == Qt::Key_Escape) {
             cancelEntryDraft();
@@ -2597,6 +2648,7 @@ void Workspace::placeTerminal(int id, int group) {
     t.group = group;
     if (!terminalGroups.contains(group)) {
         auto s = new PanelSplitter(Qt::Horizontal);
+        connect(s,&QSplitter::splitterMoved,this,&Workspace::showTerminalGridSizes);
         terminalGroups[group] = s;
         terminalStack->addWidget(s);
     }
@@ -2681,15 +2733,23 @@ void Workspace::renameTerminal(int id, const QString &name) {
     rebuildTerminals();
 }
 void Workspace::updateTerminalRowActions() {
-    auto item = terminalManager->currentItem();
+    auto item = terminalManager->itemAt(terminalHoverPoint);
+    if (!item) item = terminalManager->currentItem();
     const int id = item ? item->data(0, Qt::UserRole).toInt() : 0;
     terminalRowId = terminals.contains(id) ? id : 0;
     const auto row = item ? terminalManager->visualItemRect(item) : QRect();
     terminalRowActions->setVisible(terminalRowId && terminalManager->isVisible() && !row.isEmpty() &&
                                   row.intersects(terminalManager->viewport()->rect()));
     if (!terminalRowActions->isVisible()) return;
-    terminalRowActions->setGeometry(terminalManager->viewport()->width() - uiPx(60), row.top(), uiPx(56), row.height());
+    const QRect geometry(terminalManager->viewport()->width() - uiPx(44), row.top(), uiPx(40), row.height());
+    if (terminalRowActions->geometry() != geometry) terminalRowActions->setGeometry(geometry);
     terminalRowActions->raise();
+}
+void Workspace::showTerminalGridSizes() {
+    if (bottomTabs->currentIndex() != 0 || terminalPanel->isHidden()) return;
+    for (const auto &terminal : terminals)
+        if (terminal.view->isVisible() && terminalStack->isAncestorOf(terminal.view))
+            terminal.view->showGridSize();
 }
 void Workspace::pagePresented(QWidget *page) {
     if (restoringWorkspaceLayout || !page) return;
@@ -2830,6 +2890,7 @@ void Workspace::rebuildTerminals() {
     // Keep every terminal as a peer, reusing rows and live session views.
     const int scroll=terminalManager->verticalScrollBar()->value();
     terminalManager->resetTreeTransientState();
+    terminalHoverPoint = {-1,-1};
     QHash<int,QTreeWidgetItem *> items;
     while(terminalManager->topLevelItemCount()) {
         auto item=terminalManager->takeTopLevelItem(0);
@@ -2855,12 +2916,14 @@ void Workspace::rebuildTerminals() {
             item->setText(0,terminalLabel(term));
             item->setToolTip(0,safeTerminalTooltip(terminalLabel(term,true)+"\n【启动目录】"+term.startupDirectory));
             item->setIcon(0,icon(Icon::Terminal));
-            item->setSizeHint(0,QSize(0,uiPx(28)));
+            item->setSizeHint(0,QSize(0,uiPx(22)));
             terminalManager->addTopLevelItem(item);
         }
     }
     qDeleteAll(items);
     terminalManager->setVisible(terminals.size() > 1);
+    for (auto button : {currentTerminal, splitTerminal, closeCurrentTerminal})
+        button->setVisible(terminals.size() == 1);
     if(terminals.size()>1 && !terminalManager->property("initialWidthApplied").toBool()){
         terminalManager->setProperty("initialWidthApplied",true);
         auto split=qobject_cast<QSplitter *>(terminalManager->parentWidget());
@@ -2884,6 +2947,10 @@ void Workspace::terminalMenu(QPoint p) {
         menu.exec(terminalManager->viewport()->mapToGlobal(p));return;
     }
     QMenu m;
+    addTerminalMenuActions(m,id);
+    m.exec(terminalManager->viewport()->mapToGlobal(p));
+}
+void Workspace::addTerminalMenuActions(QMenu &m, int id) {
     m.addAction("拆分终端", this, [this, id] { if (terminals.contains(id)) addTerminal(terminals[id].group); });
     m.addAction("取消拆分，成为独立组", this, [this, id] { placeTerminal(id, nextGroup++); });
     m.addAction("移到独立窗口", this, [this, id] { if (terminals.contains(id)) floatPage(terminals[id].frame); });
@@ -2897,7 +2964,6 @@ void Workspace::terminalMenu(QPoint p) {
     });
     m.addSeparator();
     m.addAction(icon(Icon::Trash), "关闭终端", this, [this, id] { closeTerminal(id); });
-    m.exec(terminalManager->viewport()->mapToGlobal(p));
 }
 std::shared_ptr<FileDragBatch> Workspace::prepareFileDrag(const QVariantList &rows,QString *error){
     auto fail=[&](QString why)->std::shared_ptr<FileDragBatch>{if(error)*error=why;return {};};

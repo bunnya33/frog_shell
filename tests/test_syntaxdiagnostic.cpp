@@ -117,7 +117,7 @@ private slots:
         auto status = edit.findChild<QLabel *>("findStatus");
         QVERIFY(query && status);
         query->setText("x");
-        QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(" / 1"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(status->text().endsWith("共 1 项"), 5000);
         bool searchBackground = false;
         for (const auto &selection : edit.extraSelections()) {
             if (selection.format.background().style() != Qt::NoBrush) searchBackground = true;

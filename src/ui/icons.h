@@ -7,7 +7,7 @@ enum class Icon {
     Settings, Status, Explorer, Close, Return, Expand, Restore, Replace, Import, Connection,
     Trash, PanelMaximize, PanelRestore, More,
     Upload, DownloadFile, DownloadFolder, Rename, Info, Eye, CalendarClock,
-    Cut, Copy, Paste, Undo, BookmarkPlus, Save, Lock
+    Cut, Copy, Paste, Undo, BookmarkPlus, Save, Lock, Grip
 };
 enum class IconSize { Toolbar, Activity, TabClose };
 QIcon icon(Icon glyph);

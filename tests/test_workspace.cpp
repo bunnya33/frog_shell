@@ -1013,6 +1013,20 @@ class WorkspaceTests : public QObject {
         QCOMPARE(w.terminalManager->currentItem(), stableRow);
         QCOMPARE(w.focusedTerm, first);
         QCOMPARE(w.terminalRowId, first);
+        const auto point = w.terminalManager->visualItemRect(row(second)).center();
+        auto viewport = w.terminalManager->viewport();
+        QMouseEvent hover(QEvent::MouseMove, point, viewport->mapToGlobal(point),
+                          Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(viewport, &hover);
+        QCOMPARE(w.terminalRowId, second);
+        QCOMPARE(w.focusedTerm, first);
+        QEvent leave(QEvent::Leave);
+        QCoreApplication::sendEvent(viewport, &leave);
+        QCOMPARE(w.terminalRowId, first);
+        emit w.terminalGroups[group]->splitterMoved(300,1);
+        QVERIFY(w.terminals[first].view->gridSizeTimer.isActive());
+        QVERIFY(w.terminals[second].view->gridSizeTimer.isActive());
+        QTRY_VERIFY(!w.terminals[first].view->gridSizeTimer.isActive());
         w.fileFilter->setFocus(); settle();
         QVERIFY(stableRow->isSelected());
         w.maximizeTerminal->click(); settle();

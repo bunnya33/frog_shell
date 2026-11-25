@@ -159,7 +159,8 @@ class AppearanceTests : public QObject {
     void findFeatureEvidence(){
         QFETCH(bool,light);applyTheme(light);CodeEdit code;code.resize(820,400);code.setPlainText("foo FOO foobar\nfoo12 ABC34\n中文 你好\n");code.show();code.showFind(true);
         code.query->setText("foo");QTRY_COMPARE_WITH_TIMEOUT(code.matches.size(),4,5000);
-        QVERIFY(code.query->width()>=uiPx(130));for(auto b:{code.findCase,code.findWord,code.findRegex}){QVERIFY(b->isVisible());QVERIFY(!b->text().isEmpty());QVERIFY(b->geometry().left()>=code.query->geometry().right());}QVERIFY(code.findPanel->grab().save(report+QString("/find-%1.png").arg(light?"light":"dark")));
+        QCOMPARE(code.query->parentWidget()->width(), uiPx(170));
+        QVERIFY(code.query->width()>=uiPx(96));for(auto b:{code.findCase,code.findWord,code.findRegex}){QVERIFY(b->isVisible());QVERIFY(!b->text().isEmpty());QVERIFY(b->geometry().left()>=code.query->geometry().right());}QVERIFY(code.findPanel->grab().save(report+QString("/find-%1.png").arg(light?"light":"dark")));
         code.findWord->setChecked(true);QTRY_COMPARE_WITH_TIMEOUT(code.matches.size(),2,5000);
         code.findWord->setChecked(false);code.findRegex->setChecked(true);code.query->setText("([A-Za-z]+)([0-9]+)");
         QTRY_COMPARE_WITH_TIMEOUT(code.matches.size(),2,5000);code.replacement->setText("$2-$1");code.replaceMatches(true);
@@ -438,7 +439,7 @@ class AppearanceTests : public QObject {
         for(int level:{0,1,2}){
             UiZoom::instance().setLevel(level);settle();
             const auto rail=w->findChild<QFrame *>("rail");QVERIFY(rail);QCOMPARE(rail->width(),uiPx(44));QCOMPARE(w->terminalManager->width(),uiPx(170));
-            QCOMPARE(w->terminalManager->columnWidth(1),uiPx(60));
+            QCOMPARE(w->terminalManager->columnWidth(1),uiPx(44));
             QVERIFY(w->terminalManager->columnWidth(0)-2*w->terminalManager->indentation()-w->terminalManager->iconSize().width()-uiPx(8)>=w->terminalManager->fontMetrics().horizontalAdvance("shell"));
             QCOMPARE(window.tabs->tabBar()->height()+uiPx(1),uiPx(36));QCOMPARE(w->findChild<QWidget *>("resourceHeader")->height(),uiPx(36));
             QCOMPARE(w->connectionStatus->parentWidget()->height(),uiPx(24));

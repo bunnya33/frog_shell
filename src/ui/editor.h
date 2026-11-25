@@ -7,6 +7,7 @@
 #include "../core/documentsearch.h"
 #include "theme.h"
 #include "editorsurface.h"
+#include <optional>
 class EditorHighlightTests;
 namespace rs {
 class EditorLexer;
@@ -47,11 +48,24 @@ class CodeEdit : public EditorSurface {
     void setSyntaxResult(const SyntaxDiagnostic &result);
     QRect syntaxAnchorRect() const;
     QFrame *findPanel = nullptr;
+    QWidget *findInputShell = nullptr;
+    QWidget *findResizeHandle = nullptr;
     QLineEdit *query = nullptr, *replacement = nullptr;
     QWidget *replaceRow = nullptr;
     QLabel *findStatus = nullptr;
     QToolButton *findCase = nullptr, *findWord = nullptr, *findRegex = nullptr, *preserveCase = nullptr;
     QToolButton *findToggle = nullptr;
+    QToolButton *findGrip = nullptr;
+    qreal findHorizontalPosition = 1.0;
+    std::optional<qreal> findPreferredWidth;
+    std::optional<int> findDragOffset;
+    bool findGeometryChanged = false;
+    struct FindResize {
+        int pointerX;
+        int rightEdge;
+        int width;
+    };
+    std::optional<FindResize> findResize;
     struct Match {
         // UTF-16 offsets/captures belong to the last completed search snapshot.
         // Live decorations use tracked byte anchors while a refresh is pending.
@@ -86,10 +100,17 @@ class CodeEdit : public EditorSurface {
     void updateGutter();
     void locate(bool backwards = false);
     void ensureFindPanel();
+    int findPanelAvailableWidth() const;
+    int findPanelRightmostX() const;
+    void setFindPanelWidth(int panelWidth);
+    void layoutFindPanel();
+    void loadFindGeometry();
+    void finishFindDrag(bool resizing);
     void scheduleFind(bool navigate = true);
     void adjustFindMatches(int position, int removed, int added);
     void updateMatches();
     void paintMatches();
+    void setFindStatus(const QString &text);
     void updateHighlights();
     void appendSearchLineHighlights(QList<EditorExtraSelection> &selections, int position);
     void updateSearchSelectionStyle();

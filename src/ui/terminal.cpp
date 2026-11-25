@@ -1,6 +1,7 @@
 #include "messagebox.h"
 #include "terminal.h"
 #include "theme.h"
+#include "roundedsurface.h"
 #include "contentfont.h"
 #include "vterm_extensions.h"
 #include "../core/diagnostics.h"
@@ -20,6 +21,9 @@ Terminal::Terminal(QWidget *parent)
     resizeTimer.setSingleShot(true);
     resizeTimer.setInterval(0);
     connect(&resizeTimer, &QTimer::timeout, this, &Terminal::applySize);
+    gridSizeTimer.setSingleShot(true);
+    gridSizeTimer.setInterval(850);
+    connect(&gridSizeTimer,&QTimer::timeout,this,[this]{viewport()->update(gridSizeRect());});
     connect(&cursorTimer, &QTimer::timeout, this, [this] {
         if (!cursorInView()) {
             updateCursorBlink();
@@ -444,6 +448,22 @@ void Terminal::paintEvent(QPaintEvent *event) {
         p.drawText(uiPx(12), viewport()->height() - uiPx(10),
                    "多行粘贴已暂存 · Enter 发送，Esc 取消（发送后可能执行命令）");
     }
+    if (gridSizeTimer.isActive()) {
+        const auto bounds = gridSizeRect();
+        paintRoundedSurface(p,bounds,uiReal(7),c.side,c.panelBorder,uiReal(1));
+        p.setFont(uiFont(12,QFont::DemiBold));
+        p.setPen(c.text);
+        p.drawText(bounds,Qt::AlignCenter,QString("%1 × %2").arg(cols).arg(rows));
+    }
+}
+QRect Terminal::gridSizeRect() const {
+    QRect bounds(QPoint(),uiSize(68,28));
+    bounds.moveCenter(viewport()->rect().center());
+    return bounds;
+}
+void Terminal::showGridSize() {
+    gridSizeTimer.start();
+    viewport()->update(gridSizeRect());
 }
 void Terminal::resizeEvent(QResizeEvent *e) {
     QAbstractScrollArea::resizeEvent(e);
@@ -459,6 +479,7 @@ void Terminal::showEvent(QShowEvent *e) {
 }
 void Terminal::hideEvent(QHideEvent *e) {
     QAbstractScrollArea::hideEvent(e);
+    gridSizeTimer.stop();
     updateCursorBlink();
 }
 bool Terminal::event(QEvent *e) {

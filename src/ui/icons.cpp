@@ -12,7 +12,9 @@ class VectorIconEngine final : public QIconEngine {
         const auto c = colors();
         p->save();
         p->setRenderHint(QPainter::Antialiasing);
-        const qreal scale = qMin(rect.width(), rect.height()) / 24.0;
+        const qreal scale = glyph == Icon::Grip
+            ? qMin(rect.width() / 8.0, rect.height() / 16.0)
+            : qMin(rect.width(), rect.height()) / 24.0;
         p->translate(rect.center().x() - 12 * scale + .5, rect.center().y() - 12 * scale + .5);
         p->scale(scale, scale);
         QColor ink = mode == QIcon::Disabled ? c.muted
@@ -37,6 +39,13 @@ class VectorIconEngine final : public QIconEngine {
             p->drawRect(QRectF(7,3,9,6));p->drawRect(QRectF(7,14,10,7));break;
         case Icon::More:
             for (int x : {5,12,19}) { p->setBrush(ink); p->drawEllipse(QPointF(x,12),1,1); } break;
+        case Icon::Grip:
+            p->setPen(Qt::NoPen);
+            p->setBrush(mode == QIcon::Disabled ? ink : c.muted);
+            for (qreal y : {7.2, 10.4, 13.6, 16.8})
+                for (qreal x : {10.35, 13.65})
+                    p->drawEllipse(QPointF(x, y), 0.9, 0.9);
+            break;
         case Icon::NewFile:
             path({{13,3},{5,3},{5,21},{19,21},{19,9},{13,3},{13,9},{19,9}}); plus(12,15); break;
         case Icon::NewFolder:

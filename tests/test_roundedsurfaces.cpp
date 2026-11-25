@@ -29,7 +29,7 @@ class RoundedTests : public QObject {
         QImage image(QSize(qCeil(w.width()*dpr),qCeil(w.height()*dpr)),QImage::Format_ARGB32_Premultiplied);
         image.setDevicePixelRatio(dpr);image.fill(Qt::transparent);w.render(&image);return image;
     }
-    void corners(const QImage &image,qreal radius,qreal width,QColor color) {
+    void corners(const QImage &image,qreal radius,qreal width,QColor color,QColor leftStrip = {}) {
         // Probe all four quarter arcs, including their joins to straight edges.
         // Search neighboring raster samples to allow subpixel/DPR antialiasing.
         const auto dpr=image.devicePixelRatio();
@@ -38,11 +38,12 @@ class RoundedTests : public QObject {
             const qreal angle=step*std::numbers::pi/16;
             QPointF p(radius-(radius-width/2)*std::cos(angle),radius-(radius-width/2)*std::sin(angle));
             if(corner&1)p.setX(size.width()-p.x());if(corner&2)p.setY(size.height()-p.y());
+            const QColor expected = leftStrip.isValid() && p.x() < uiReal(2) ? leftStrip : color;
             int best=1000;
             for(int y=qRound(p.y()*dpr)-1;y<=qRound(p.y()*dpr)+1;++y)
                 for(int x=qRound(p.x()*dpr)-1;x<=qRound(p.x()*dpr)+1;++x) {
                     if(!image.rect().contains(x,y))continue;const auto c=image.pixelColor(x,y);if(c.alpha()<100)continue;
-                    best=qMin(best,qAbs(c.red()-color.red())+qAbs(c.green()-color.green())+qAbs(c.blue()-color.blue()));
+                    best=qMin(best,qAbs(c.red()-expected.red())+qAbs(c.green()-expected.green())+qAbs(c.blue()-expected.blue()));
                 }
             // A <1 physical-pixel stroke has lower maximum raster coverage.
             const auto tolerance=qCeil(72/qMin(qreal(1),width*dpr));
@@ -124,7 +125,10 @@ class RoundedTests : public QObject {
         auto frame=table.findChild<QWidget *>("roundedSurfaceBorder",Qt::FindDirectChildrenOnly);QVERIFY(frame);QVERIFY(frame->testAttribute(Qt::WA_TransparentForMouseEvents));
         auto image=render(table,dpr);corners(image,uiReal(8),uiReal(1),colors().cardBorder);
         QCOMPARE(table.mask(),QRegion());QCOMPARE(table.findChildren<QWidget *>("roundedSurfaceBorder").size(),1);
-        for(auto role:{"transfer","find"}) {setFrameRole(&table,role);settle();image=render(table,dpr);corners(image,uiReal(QByteArray(role)=="find"?4:5),uiReal(1),colors().panelBorder);}
+        setFrameRole(&table,"transfer");settle();
+        corners(render(table,dpr),uiReal(5),uiReal(1),colors().panelBorder);
+        setFrameRole(&table,"find");settle();
+        corners(render(table,dpr),uiReal(8),uiReal(1),colors().panelBorder,QColor(light?"#afb8c1":"#494b55"));
         table.setObjectName("breadcrumbs");installRoundedSurface(&table,RoundedRole::Path);table.setProperty("uploadTarget",true);settle();
         corners(render(table,dpr),uiReal(5),uiReal(2),colors().accent);
         table.setProperty("uploadTarget",false);settle();corners(render(table,dpr),uiReal(5),uiReal(1),colors().line);

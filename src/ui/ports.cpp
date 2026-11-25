@@ -152,10 +152,22 @@ PortsPanel::PortsPanel(const QString &id, bool offline, QWidget *parent)
     table->setEditTriggers(QAbstractItemView::NoEditTriggers); table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     table->setContextMenuPolicy(Qt::CustomContextMenu); uiMinimumHeight(table,100);table->setFrameShape(QFrame::NoFrame);
     table->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);tableCard=processCard(table);tableCard->setObjectName("portsTableCard");layout->addWidget(tableCard,1);
-    empty = new QLabel("暂无端口转发"); empty->setProperty("muted",true); empty->setAlignment(Qt::AlignCenter);
-    layout->addWidget(empty,1);
-    emptyAdd = button("添加端口"); emptyAdd->setIcon(icon(Icon::Add)); emptyAdd->setObjectName("addPort");
-    layout->addWidget(emptyAdd,0,Qt::AlignHCenter); connect(emptyAdd,&QPushButton::clicked,this,[this]{beginEdit();});
+    auto emptyState = new QWidget;
+    auto emptyLayout = new QVBoxLayout(emptyState);
+    uiMargins(emptyLayout,16,14,16,12);
+    uiSpacing(emptyLayout,10);
+    empty = new QLabel("暂无端口转发。转发后，可通过本机端口访问远端服务。");
+    empty->setWordWrap(true);
+    emptyLayout->addWidget(empty);
+    emptyAdd = button("转发端口");
+    emptyAdd->setObjectName("addPort");
+    emptyAdd->setProperty("emptyPortAction",true);
+    uiMaximumWidth(emptyAdd,300);
+    uiMinimumHeight(emptyAdd,26);
+    emptyLayout->addWidget(emptyAdd);
+    emptyLayout->addStretch();
+    layout->addWidget(emptyState,1);
+    connect(emptyAdd,&QPushButton::clicked,this,[this]{beginEdit();});
     connect(table,&QTableView::clicked,this,[this](const QModelIndex &index){
         const auto id = index.data(Qt::UserRole).toString(); if (id.isEmpty() || busy(id)) return;
         if(index.column()==4) {
@@ -354,7 +366,7 @@ void PortsPanel::cancelDraft() {
 }
 void PortsPanel::refreshRows() {
     model->reset(); const bool isEmpty=model->values.isEmpty()&&!draft;
-    tableCard->setVisible(!isEmpty);table->setVisible(!isEmpty); empty->setVisible(isEmpty); emptyAdd->setVisible(isEmpty); emptyAdd->setEnabled(loaded);
+    tableCard->setVisible(!isEmpty);table->setVisible(!isEmpty); empty->parentWidget()->setVisible(isEmpty); emptyAdd->setEnabled(loaded);
     table->clearSpans(); table->resizeRowsToContents();
     if (!isEmpty) {
         const int last=model->rowCount()-1; table->setSpan(last,0,1,5);

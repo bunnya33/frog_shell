@@ -1,6 +1,7 @@
 #include "../src/ui/editor.h"
 #include "../src/ui/contentfont.h"
 #include "../src/ui/theme.h"
+#include "../src/ui/uipreferences.h"
 #include <QtTest>
 #include <QTextBlock>
 
@@ -65,9 +66,174 @@ class EditorHighlightTests : public QObject {
         QVERIFY(QDir().mkpath(report));
     }
     void init() {
+        QSettings().remove("editor/findPanelGeometry");
         UiZoom::instance().setLevel(0);
         ContentFonts::instance().resetDefaults();
         applyTheme(false);
+    }
+    void findPanelDragsHorizontally() {
+        CodeEdit edit;
+        edit.resize(800, 300);
+        edit.show();
+        edit.activateWindow();
+        edit.showFind();
+        auto grip = edit.findChild<QToolButton *>("findDragHandle");
+        auto query = edit.findChild<QLineEdit *>("findQuery");
+        auto toggle = edit.findChild<QToolButton *>("findToggleReplace");
+        QVERIFY(grip && query && toggle);
+        auto panel = grip->parentWidget();
+        QCOMPARE(grip->cursor().shape(), Qt::SizeAllCursor);
+        QCOMPARE(panel->size(), uiSize(424,34));
+        settle();
+        QTRY_VERIFY(query->hasFocus());
+        query->setText("needle");
+        const QPoint initial = panel->pos();
+        QVERIFY(initial.x() > 100);
+        auto drag = [&edit, grip](QPoint delta) {
+            auto window = edit.windowHandle();
+            const QPoint start = grip->mapTo(&edit, grip->rect().center());
+            const QPoint target(qBound(1, start.x() + delta.x(), edit.width() - 2),
+                                start.y() + delta.y());
+            QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, start);
+            QTest::mouseMove(window, target);
+            QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, target);
+        };
+        drag(QPoint(-100, 45));
+        QCOMPARE(panel->pos(), initial - QPoint(100, 0));
+        QVERIFY(query->hasFocus());
+        QCOMPARE(query->text(), QString("needle"));
+        QTest::mouseClick(toggle, Qt::LeftButton);
+        auto replacement = edit.findChild<QLineEdit *>("findReplacement");
+        QVERIFY(replacement && replacement->isVisible());
+        QCOMPARE(panel->pos(), initial - QPoint(100, 0));
+
+        replacement->setFocus();
+        drag(QPoint(-800, 0));
+        QCOMPARE(panel->pos(), QPoint(0, initial.y()));
+        QVERIFY(replacement->hasFocus());
+        edit.resize(700, 300);
+        edit.showFind();
+        QCOMPARE(panel->pos(), QPoint(0, initial.y()));
+        UiZoom::instance().setLevel(1);
+        QCOMPARE(panel->pos(), QPoint(0, uiPx(4)));
+        UiZoom::instance().setLevel(0);
+        edit.resize(800, 300);
+        edit.setFocus();
+        drag(QPoint(800, 0));
+        QCOMPARE(panel->pos(), initial);
+        QVERIFY(edit.hasFocus());
+    }
+    void findPanelResizesFromLeft_data() {
+        states_data();
+    }
+    void findPanelResizesFromLeft() {
+        QFETCH(bool, light);
+        applyTheme(light);
+        CodeEdit edit;
+        edit.resize(800, 300);
+        edit.setPlainText("foo foo\nfoo foo");
+        edit.show();
+        edit.activateWindow();
+        edit.showFind();
+        auto panel = edit.findPanel;
+        auto edge = edit.findResizeHandle;
+        auto grip = edit.findGrip;
+        auto input = edit.findInputShell;
+        auto query = edit.query;
+        QCOMPARE(panel->width(), uiPx(424));
+        QCOMPARE(edge->cursor().shape(), Qt::SizeHorCursor);
+        QCOMPARE(grip->cursor().shape(), Qt::SizeAllCursor);
+        QCOMPARE(panel->childAt(edge->mapTo(panel, edge->rect().center())), edge);
+        QCOMPARE(panel->childAt(grip->mapTo(panel, grip->rect().center())), grip);
+        QTRY_VERIFY(query->hasFocus());
+        QCOMPARE(edit.findStatus->text(), QString("无结果"));
+        query->setText("foo");
+        QTRY_VERIFY(edit.findStatus->text().contains("4"));
+        QTest::mouseMove(edit.windowHandle(), QPoint(20, 130));
+        save(panel->grab().toImage(), light ? "resize-find-light" : "resize-find-dark");
+
+        const int initialRight = panel->x() + panel->width();
+        const int initialY = panel->y();
+        const int initialInput = input->width();
+        const auto roundedPanel = panel->grab().toImage();
+        const auto edgeColor = [&](int x) {
+            const QPoint position = edge->mapTo(panel, QPoint(x, edge->height() / 2));
+            return pixel(panel->grab().toImage(), position);
+        };
+        const QColor idle(light ? "#afb8c1" : "#494b55");
+        const QColor hover(light ? "#4f84c4" : "#626184");
+        const QColor active = light ? colors().accent : colors().comment;
+        QCOMPARE(edgeColor(0), idle);
+        QCOMPARE(edgeColor(1), idle);
+        QCOMPARE(edgeColor(2), colors().side);
+        const QColor besideStrip = pixel(roundedPanel, QPoint(3, edge->height() / 2));
+        QCOMPARE(pixel(roundedPanel, QPoint(1, 1)), colors().background);
+        QCOMPARE(pixel(roundedPanel, QPoint(1, panel->height() - 2)), colors().background);
+        QCOMPARE(pixel(roundedPanel, QPoint(1, 7)), idle);
+        const QPoint edgeCenter = edge->mapTo(&edit, edge->rect().center());
+        QTest::mouseMove(edit.windowHandle(), edgeCenter);
+        QTRY_COMPARE(edgeColor(2), hover);
+        QCOMPARE(edgeColor(3), besideStrip);
+        save(panel->grab().toImage(), light ? "resize-hover-light" : "resize-hover-dark");
+        QTest::mousePress(edit.windowHandle(), Qt::LeftButton, Qt::NoModifier, edgeCenter);
+        QCOMPARE(edgeColor(2), active);
+        QCOMPARE(edgeColor(3), besideStrip);
+        save(panel->grab().toImage(), light ? "resize-active-light" : "resize-active-dark");
+        QTest::mouseRelease(edit.windowHandle(), Qt::LeftButton, Qt::NoModifier, edgeCenter);
+        QTest::mouseMove(edit.windowHandle(), QPoint(20, 130));
+        QTRY_COMPARE(edgeColor(1), idle);
+        QCOMPARE(edgeColor(2), colors().side);
+        QVERIFY(!QSettings().contains("editor/findPanelGeometry"));
+        const auto drag = [&](int delta) {
+            auto window = edit.windowHandle();
+            const QPoint start = edge->mapTo(&edit, edge->rect().center());
+            const QPoint target(qBound(0, start.x() + delta, edit.width() - 1), start.y());
+            QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, start);
+            QTest::mouseMove(window, target);
+            QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, target);
+            QCoreApplication::processEvents();
+        };
+        drag(-120);
+        QCOMPARE(panel->width(), uiPx(544));
+        QCOMPARE(panel->x() + panel->width(), initialRight);
+        QCOMPARE(panel->y(), initialY);
+        QVERIFY(input->width() > initialInput);
+        QVERIFY(query->hasFocus());
+        QCOMPARE(query->text(), QString("foo"));
+        query->clear();
+        QCOMPARE(edit.findStatus->text(), QString("无结果"));
+
+        edit.closeFind();
+        edit.showFind();
+        QCOMPARE(panel->width(), uiPx(544));
+        edit.resize(365, 300);
+        QVERIFY(panel->width() <= edit.width());
+        edit.resize(800, 300);
+        QCOMPARE(panel->width(), uiPx(544));
+        drag(600);
+        QCOMPARE(panel->width(), uiPx(330));
+        QCOMPARE(panel->x() + panel->width(), initialRight);
+        drag(-800);
+        QCOMPARE(panel->width(), edit.width() - uiPx(24));
+        QCOMPARE(panel->x() + panel->width(), initialRight);
+        drag(150);
+        const QPoint moveStart = grip->mapTo(&edit, grip->rect().center());
+        QTest::mousePress(edit.windowHandle(), Qt::LeftButton, Qt::NoModifier, moveStart);
+        QTest::mouseMove(edit.windowHandle(), moveStart - QPoint(100, 0));
+        QTest::mouseRelease(edit.windowHandle(), Qt::LeftButton, Qt::NoModifier, moveStart - QPoint(100, 0));
+        const QRect customized = panel->geometry();
+        QVERIFY(customized.x() > 0 && customized.x() < edit.findPanelRightmostX());
+        QSettings().sync();
+        edit.closeFind();
+        CodeEdit reopened;
+        reopened.resize(800, 300);
+        reopened.show();
+        reopened.showFind();
+        QCOMPARE(reopened.findPanel->geometry(), customized);
+        QCOMPARE(reopened.findStatus->text(), QString("无结果"));
+        UiPreferences::instance().reset();
+        QCOMPARE(reopened.findPanel->width(), uiPx(424));
+        QCOMPARE(reopened.findPanel->x(), reopened.findPanelRightmostX());
     }
     void states_data() {
         QTest::addColumn<bool>("light");
@@ -114,7 +280,7 @@ class EditorHighlightTests : public QObject {
         auto status = edit.findChild<QLabel *>("findStatus");
         QVERIFY(query && status);
         QTest::keyClicks(query, "needle");
-        QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(" / 2"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(status->text().endsWith("共 2 项"), 5000);
         QVERIFY(query->hasFocus());
         QVERIFY(edit.textCursor().hasSelection());
         QCOMPARE(edit.textCursor().selectedText(), QString("needle"));
@@ -143,11 +309,11 @@ class EditorHighlightTests : public QObject {
 
         QVERIFY(query->hasFocus());
         QTest::keyClick(query, Qt::Key_Return);
-        QTRY_VERIFY(status->text().startsWith("2 /"));
+        QTRY_VERIFY(status->text().startsWith("第 2 项"));
         QCOMPARE(edit.textCursor().selectedText(), QString("needle"));
         QCOMPARE(edit.toPlainText(),original);
-        QTest::keyClick(query,Qt::Key_Return,Qt::ShiftModifier);QTRY_VERIFY(status->text().startsWith("1 /"));QCOMPARE(edit.textCursor().selectedText(),QString("needle"));QCOMPARE(edit.toPlainText(),original);
-        QTest::keyClick(query,Qt::Key_Enter);QTRY_VERIFY(status->text().startsWith("2 /"));QCOMPARE(edit.textCursor().selectedText(),QString("needle"));QCOMPARE(edit.toPlainText(),original);
+        QTest::keyClick(query,Qt::Key_Return,Qt::ShiftModifier);QTRY_VERIFY(status->text().startsWith("第 1 项"));QCOMPARE(edit.textCursor().selectedText(),QString("needle"));QCOMPARE(edit.toPlainText(),original);
+        QTest::keyClick(query,Qt::Key_Enter);QTRY_VERIFY(status->text().startsWith("第 2 项"));QCOMPARE(edit.textCursor().selectedText(),QString("needle"));QCOMPARE(edit.toPlainText(),original);
         auto expand=edit.findChild<QToolButton *>("findToggleReplace");QVERIFY(expand);QTest::mouseClick(expand,Qt::LeftButton);
         auto replacement=edit.findChild<QLineEdit *>("findReplacement");QVERIFY(replacement&&replacement->isVisible());replacement->setFocus();replacement->setText("replacement");
         for(const auto key:{Qt::Key_Return,Qt::Key_Enter}){QTest::keyClick(replacement,key);QCOMPARE(edit.toPlainText(),original);QCOMPARE(edit.document()->isModified(),modified);}
@@ -172,11 +338,24 @@ class EditorHighlightTests : public QObject {
         query->setFocus();
         QTest::keyClick(query, Qt::Key_A, Qt::ControlModifier);
         QTest::keyClicks(query, "needle");
-        QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(" / 2"), 5000);
-        QTest::keyClick(query, Qt::Key_Escape);
+        QTRY_VERIFY_WITH_TIMEOUT(status->text().endsWith("共 2 项"), 5000);
+        QTest::keyClick(query, Qt::Key_Return);
+        const auto lastMatch = edit.textCursor();
+        const auto firstVisibleLine = edit.send(SCI_GETFIRSTVISIBLELINE);
+        if (light) {
+            auto close = edit.findChild<QToolButton *>("findClose");
+            QVERIFY(close);
+            QTest::mouseClick(close, Qt::LeftButton);
+        } else {
+            QTest::keyClick(query, Qt::Key_Escape);
+        }
         QTRY_VERIFY(edit.hasFocus());
         QVERIFY(edit.extraSelections().isEmpty());
-        QVERIFY(!edit.textCursor().hasSelection());
+        QCOMPARE(edit.textCursor(), lastMatch);
+        QCOMPARE(edit.textCursor().selectedText(), QString("needle"));
+        QCOMPARE(edit.send(SCI_GETFIRSTVISIBLELINE), firstVisibleLine);
+        QVERIFY(edit.selectionBackground() != QColor("#eaa13b"));
+        QCOMPARE(rowBackground(edit, image(edit)), background);
         QTest::keyClick(&edit, Qt::Key_Right);
         QVERIFY(!edit.textCursor().hasSelection());
         QVERIFY(edgePixels(edit, image(edit), border) >= edit.cursorRect().height());
@@ -189,7 +368,7 @@ class EditorHighlightTests : public QObject {
         edit.show(); edit.activateWindow(); edit.showFind();
         auto query=edit.findChild<QLineEdit *>("findQuery");
         auto status=edit.findChild<QLabel *>("findStatus");
-        query->setText("needle"); QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(" / 2"),5000);
+        query->setText("needle"); QTRY_VERIFY_WITH_TIMEOUT(status->text().endsWith("共 2 项"),5000);
         QCOMPARE(edit.textCursor().selectedText(),QString("needle"));
         edit.setFocus(); placeOnLine(edit,1); edit.moveCursor(QTextCursor::EndOfBlock);
         QTest::keyClicks(&edit,"!"); const auto caret=edit.textCursor().position();
@@ -255,7 +434,7 @@ class EditorHighlightTests : public QObject {
         QFETCH(QString,operation);
         CodeEdit edit;edit.resize(700,300);edit.setPlainText("needle\nedit here\nneedle\n");edit.show();edit.activateWindow();edit.showFind();
         auto query=edit.findChild<QLineEdit *>("findQuery");auto status=edit.findChild<QLabel *>("findStatus");
-        query->setText("needle");QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(" / 2"),5000);
+        query->setText("needle");QTRY_VERIFY_WITH_TIMEOUT(status->text().endsWith("共 2 项"),5000);
         edit.setFocus();placeOnLine(edit,1);edit.moveCursor(QTextCursor::EndOfBlock);
         if(operation=="paste")edit.insertPlainText(" pasted\nnew line");
         else if(operation=="delete")QTest::keyClick(&edit,Qt::Key_Backspace);
@@ -400,13 +579,13 @@ class EditorHighlightTests : public QObject {
     void closingFindPreservesManualSelectionAndRejectsStaleResults() {
         CodeEdit edit; edit.setPlainText(QString(150000,'x')+" needle end"); edit.resize(700,300); edit.show();
         edit.showFind(); auto query=edit.findChild<QLineEdit *>("findQuery"); auto status=edit.findChild<QLabel *>("findStatus");
-        query->setText("needle"); QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(" / 1"),5000);
+        query->setText("needle"); QTRY_VERIFY_WITH_TIMEOUT(status->text().endsWith("共 1 项"),5000);
         QVERIFY(edit.textCursor().hasSelection());
         EditorCursor manual(edit.document());manual.setPosition(0);manual.setPosition(4,QTextCursor::KeepAnchor);edit.setTextCursor(manual);
         QTest::keyClick(query,Qt::Key_Escape); QCOMPARE(edit.textCursor(),manual);
         edit.showFind();query->setText("x");QTest::qWait(110);query->clear();
         QTest::qWait(350);QVERIFY(edit.extraSelections().isEmpty());QCOMPARE(edit.textCursor(),manual);
-        QVERIFY(status->text().isEmpty());
+        QCOMPARE(status->text(), QString("无结果"));
     }
     void movementScrollZoomAndFocus() {
         QWidget host;
@@ -461,7 +640,7 @@ class EditorHighlightTests : public QObject {
         edit.setLineWrapMode(EditorSurface::WidgetWidth);
         edit.setPlainText("before\n// 修复 " + QString("中文配置与状态 ").repeated(32) + "修复\nother\n"); edit.show(); edit.activateWindow();
         edit.showFind(); auto query=edit.findChild<QLineEdit *>("findQuery"); auto status=edit.findChild<QLabel *>("findStatus");
-        QVERIFY(query&&status); query->setText("修复"); QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(" / 2"),5000);
+        QVERIFY(query&&status); query->setText("修复"); QTRY_VERIFY_WITH_TIMEOUT(status->text().endsWith("共 2 项"),5000);
         const auto block=edit.document()->firstBlock().next(); QVERIFY(int(edit.send(SCI_WRAPCOUNT, block.blockNumber()))>=3); EditorCursor start(block);
         const int top=edit.cursorRect(start).top(),height=edit.lineHeight(); const auto shot=image(edit); const QColor row(light?"#f0edf8":"#363447");
         for(int i=0;i<3;++i){const int y=top+i*height+height/2;QVERIFY(y>=0&&y<edit.viewport()->height());QCOMPARE(pixel(shot,QPoint(edit.viewport()->width()-8,y)),row);}

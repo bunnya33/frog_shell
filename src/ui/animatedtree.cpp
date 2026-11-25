@@ -10,6 +10,13 @@ namespace {
 class TreeDensityDelegate final : public DensityDelegate {
   public:
     explicit TreeDensityDelegate(AnimatedTreeWidget *tree) : DensityDelegate(28, tree), tree(tree) {}
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override {
+        if (!tree->property("animatedTreeTerminalPeers").toBool())
+            return DensityDelegate::sizeHint(option, index);
+        auto size = QStyledItemDelegate::sizeHint(option, index);
+        size.setHeight(qMax(uiPx(22), option.fontMetrics.height() + uiPx(2)));
+        return size;
+    }
     void paint(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const override {
         auto adjusted = option;
         if (index.column() == 0 && tree->property("animatedTreeTerminalPeers").toBool() &&
@@ -166,13 +173,15 @@ void AnimatedTreeWidget::paintRowBackground(QPainter *p, const QRect &rect, cons
     QColor color = selected ? QColor(lightTheme() ? "#dceaff" : "#45475c")
                             : QColor(lightTheme() ? "#eef1f4" : "#343746");
     if (!selected) color.setAlphaF(qBound(qreal(0), hover, qreal(1)));
-    const int gutter = uiPx(8);
+    const bool terminal = state->mode == TreeMode::TerminalPeers;
+    const int gutter = uiPx(terminal ? 2 : 8);
     const QRectF row(gutter, rect.top() + uiPx(1), qMax(0, viewport()->width() - 2*gutter), qMax(0, rect.height() - uiPx(2)));
     p->save();
     p->setRenderHint(QPainter::Antialiasing);
     p->setPen(Qt::NoPen);
     p->setBrush(color);
-    p->drawRoundedRect(row, uiReal(6), uiReal(6));
+    const auto radius = uiReal(terminal ? 4 : 6);
+    p->drawRoundedRect(row, radius, radius);
     p->restore();
 }
 
@@ -195,6 +204,8 @@ void AnimatedTreeWidget::drawBranches(QPainter *p, const QRect &rect, const QMod
     p->setPen(line);
     const qreal mid = rect.center().y();
     if (state->mode == TreeMode::TerminalPeers) {
+        line.setColor(colors().muted);
+        p->setPen(line);
         const int position = index.siblingAtColumn(0).data(TerminalPeerPositionRole).toInt();
         if (position >= 1 && position <= 3) {
             const qreal x = rect.right() - indentation()/2.0;

@@ -290,6 +290,7 @@ class Workspace : public QWidget {
     Session *serviceSession(QObject *owner, Session::Mode mode);
     void stopServices();
     int terminalRowId = 0;
+    QPoint terminalHoverPoint{-1,-1};
     bool terminalMaximized = false;
     int savedTerminalHeight = 280;
     qreal savedTerminalRatio = 1.0 / 3.0;
@@ -410,8 +411,10 @@ class Workspace : public QWidget {
     void activateTerminal(int id, bool focus = false);
     void renameTerminal(int id, const QString &name);
     void updateTerminalRowActions();
+    void showTerminalGridSizes();
     void rebuildTerminals();
     void terminalMenu(QPoint point);
+    void addTerminalMenuActions(QMenu &menu, int id);
     void placeTerminal(int id, int group);
     void setTerminalMaximized(bool maximized);
     void hideTerminalPanel();

@@ -30,6 +30,7 @@ class Terminal final : public QAbstractScrollArea {
     void copy();
     bool hasSelection() const {return selectionActive;}
     void clearOutput();
+    void showGridSize();
   signals:
     void input(const QByteArray &bytes);
     void sizeChanged(int columns, int rows);
@@ -82,6 +83,7 @@ class Terminal final : public QAbstractScrollArea {
     VTermPos cursor{};
     QTimer repaintTimer;
     QTimer resizeTimer;
+    QTimer gridSizeTimer;
     QTimer cursorTimer;
     QPointer<QWidget> cursorWindow;
     QPointer<QWindow> cursorHandle;
@@ -107,6 +109,7 @@ class Terminal final : public QAbstractScrollArea {
     void updateCursorRect(const QRect &rect);
     void watchCursorWindow();
     void applySize();
+    QRect gridSizeRect() const;
     QVector<InkSpan> rowHighlights(const QVector<VTermScreenCell> &line) const;
     QColor displayColor(VTermColor color, const QColor &defaultFg, const QColor &defaultBg) const;
     QFont cellFont(const VTermScreenCellAttrs &attributes) const;

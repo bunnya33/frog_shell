@@ -95,7 +95,7 @@ class DocumentSearchTests : public QObject {
         QVERIFY(centered());bool underline=false;for(const auto &s:a->code->extraSelections())underline|=s.format.underlineStyle()==QTextCharFormat::WaveUnderline;QVERIFY(underline);
         workspace->floatPage(a);UiZoom::instance().setLevel(1);auto reset=qScopeGuard([]{UiZoom::instance().setLevel(0);});controller.activateResult(0);settle();QVERIFY(centered());
         a->code->showFind();auto find=a->code->findChild<QLineEdit *>("findQuery");auto status=a->code->findChild<QLabel *>("findStatus");QVERIFY(find&&status);find->setText("unique");
-        QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(" / 1"),5000);QVERIFY(centered());
+        QTRY_VERIFY_WITH_TIMEOUT(status->text().endsWith("共 1 项"),5000);QVERIFY(centered());
         bool hasAdvanced=false,hasFind=false;underline=false;for(const auto &s:a->code->extraSelections()){
             hasAdvanced|=s.cursor.selectedText()==QString("修复");hasFind|=s.cursor.selectedText()==QString("unique");underline|=s.format.underlineStyle()==QTextCharFormat::WaveUnderline;
         }QVERIFY(hasAdvanced&&hasFind&&underline);QCOMPARE(a->code->toPlainText(),text);
