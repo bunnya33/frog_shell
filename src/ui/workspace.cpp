@@ -459,10 +459,12 @@ Workspace::Workspace(Profile p, std::optional<QByteArray> secret, bool demonstra
     if(auto lock=AppLock::instance())connect(lock,&AppLock::lockedChanged,this,[this](bool locked){
         if(!locked){
             ensureServerClock();
+            if(!recoveringTunnels.isEmpty())scheduleTunnelReconnect();
             if(deferredConflict){auto pending=*deferredConflict;deferredConflict.reset();if(pending.worker)showUploadConflict(pending.worker,pending.id,pending.nonce,pending.path,pending.canOverwrite);}
             if(!transferQueue.isEmpty())ensureTransferSession();return;
         }
-        cancelBookmarkIntent();for(auto weak:fileDrags)if(auto batch=weak.lock())batch->cancel();cancelQueuedTunnels("应用已锁定，请解锁后手动启动。");
+        cancelBookmarkIntent();for(auto weak:fileDrags)if(auto batch=weak.lock())batch->cancel();
+        cancelQueuedTunnels("应用已锁定，请解锁后手动启动。",true);
         servicesReading=false;preparingCredentials=false;
         if(mainPending&&!online)cancelMainConnection();
     });
@@ -816,6 +818,8 @@ void Workspace::buildUi() {
     portsPanel=new PortsPanel(profile.id);
     connect(portsPanel,&PortsPanel::configurationChanged,this,&Workspace::tunnelCountsChanged);
     connect(portsPanel,&PortsPanel::tunnelRunningChanged,this,&Workspace::tunnelCountsChanged);
+    tunnelReconnectTimer.setSingleShot(true);
+    connect(&tunnelReconnectTimer, &QTimer::timeout, this, &Workspace::ensureTunnels);
     portsPanel->startGuard=[this]{return tunnelStartError();};
     bottomContents->addWidget(portsPanel);tl->addWidget(bottomContents,1);
     bottomContents->addWidget(servicesPanel);

@@ -21,8 +21,13 @@ QString shortState(const QString &state) {
     if (state == "starting") return "启动中…";
     if (state == "stopping") return "停止中…";
     if (state == "running") return "已建立";
+    if (state == "unresponsive") return "无响应";
+    if (state == "reconnecting") return "正在重连";
     if (state == "failed") return "启动失败";
     return "已停止";
+}
+bool recovering(const QString &state) {
+    return state == "unresponsive" || state == "reconnecting";
 }
 bool preserveDraft(QWidget *widget) {
     for (auto w = widget; w; w = w->parentWidget())
@@ -52,8 +57,10 @@ class PortsModel : public QAbstractTableModel {
         }
         const auto &rule = values[index.row()]; const auto status = panel->runtime.value(rule.id);
         if (role == Qt::UserRole) return rule.id;
-        if (role == Qt::CheckStateRole && index.column() == 4)
+        if (role == Qt::CheckStateRole && index.column() == 4) {
+            if (recovering(status.state)) return Qt::PartiallyChecked;
             return status.state == "running" ? Qt::Checked : Qt::Unchecked;
+        }
         if (role == Qt::DisplayRole) {
             if (index.column() == 0) return rule.localPort;
             if (index.column() == 1) return rule.remotePort;
@@ -81,8 +88,10 @@ class PortsModel : public QAbstractTableModel {
     }
     Qt::ItemFlags flags(const QModelIndex &index) const override {
         auto result = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
-        if (index.column() == 4 && index.row() < values.size() && !panel->busy(values[index.row()].id))
-            result |= Qt::ItemIsUserCheckable;
+        if (index.column() == 4 && index.row() < values.size()) {
+            const auto id = values[index.row()].id;
+            if (!panel->busy(id) || recovering(panel->state(id))) result |= Qt::ItemIsUserCheckable;
+        }
         return result;
     }
     void reset() { beginResetModel(); endResetModel(); }
@@ -112,9 +121,10 @@ class PortsDelegate : public QStyledItemDelegate {
                             p->fontMetrics().elidedText(tunnelEndpoint(address,port),Qt::ElideMiddle,rect.width()));
             }
         } else if(index.column()==4) {
-            paintToggle(*p,QRectF(rect.left(),rect.center().y()-uiPx(10),uiPx(36),uiPx(20)),status.state == "running" ? 1 : 0,
-                        !panel->busy(rule.id),option.state & QStyle::State_HasFocus);
-            p->setPen(!status.intentError.isEmpty()?c.orange:status.state=="failed"?c.red:status.state=="running"?c.green:c.muted);
+            const qreal togglePosition = recovering(status.state) ? 0.5 : status.state == "running" ? 1.0 : 0.0;
+            paintToggle(*p,QRectF(rect.left(),rect.center().y()-uiPx(10),uiPx(36),uiPx(20)),togglePosition,
+                        !panel->busy(rule.id)||recovering(status.state),option.state & QStyle::State_HasFocus);
+            p->setPen(!status.intentError.isEmpty()||recovering(status.state)?c.orange:status.state=="failed"?c.red:status.state=="running"?c.green:c.muted);
             const auto statusRect = QRect(rect.left()+uiPx(44),rect.top(),rect.width()-uiPx(44),rect.height());
             p->drawText(statusRect,Qt::AlignVCenter,p->fontMetrics().elidedText(index.data().toString(),Qt::ElideRight,statusRect.width()));
         } else {p->setPen(index.column()==2?networkSendColor():networkReceiveColor());p->drawText(rect,Qt::AlignLeft|Qt::AlignVCenter,index.data(Qt::DisplayRole).toString());}
@@ -176,7 +186,7 @@ std::optional<TunnelRule> PortsPanel::rule(const QString &id) const {
 QString PortsPanel::state(const QString &id) const { return runtime.value(id).state; }
 bool PortsPanel::running(const QString &id) const { return state(id) == "running"; }
 bool PortsPanel::busy(const QString &id) const {
-    const auto s = state(id); return s == "connecting" || s == "starting" || s == "stopping";
+    const auto s = state(id); return s == "connecting" || s == "starting" || s == "stopping" || recovering(s);
 }
 int PortsPanel::activeCount() const {
     int count=0; for (const auto &r : model->values) if (running(r.id)||busy(r.id)) ++count; return count;
@@ -401,11 +411,17 @@ void PortsPanel::scheduleFontLayout() {
     QTimer::singleShot(0,this,[this]{fontLayoutPending=false;table->horizontalHeader()->setFont(table->font());table->resizeRowsToContents();sizeColumns();table->viewport()->update();});
 }
 void PortsPanel::toggleRule(const QString &id) {
-    if (busy(id)) return;
-    if (running(id)) emit stopRequested(id);
+    if (running(id) || recovering(state(id))) emit stopRequested(id);
+    else if (busy(id)) return;
     else if (const auto value=rule(id)) emit startRequested(*value);
 }
 void PortsPanel::showMenu(const QString &id, QPoint global) {
+    if (recovering(state(id))) {
+        FileContextMenu menu(this);
+        menu.addAction("停止转发", this, [this,id] { if (!OperationGate::locked()) emit stopRequested(id); });
+        menu.exec(global);
+        return;
+    }
     if (busy(id) || !rule(id)) return;
     QScopedValueRollback<bool> guard(dialogOpen,true);
     FileContextMenu menu(this); menu.setObjectName("portMenu");

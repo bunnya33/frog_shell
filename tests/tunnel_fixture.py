@@ -24,6 +24,18 @@ CHUNK = 16384
 PATTERN = bytes(range(256)) * 1024
 
 
+class FixtureTransport(paramiko.Transport):
+    def __init__(self, peer, fixture):
+        self.fixture = fixture
+        super().__init__(peer, default_window_size=CAP, default_max_packet_size=CHUNK)
+
+    def _parse_global_request(self, message):
+        if self.fixture.silence_keepalive and paramiko.Message(message.asbytes()).get_text() == "keepalive@openssh.com":
+            self.fixture.count("keepalives")
+            return
+        super()._parse_global_request(message)
+
+
 class Fixture:
     def __init__(self, directory, ui_sftp_rejection=False, hostkey_type="rsa"):
         self.directory = directory
@@ -36,10 +48,13 @@ class Fixture:
         self.userkey.write_private_key_file(str(directory / "identity"))
         self.userkey.write_private_key_file(str(directory / "encrypted"), password="fixture-key")
         self.transports = []
+        self.outage = False
+        self.silence_keepalive = False
         self.counters = dict(connections=0, authenticated=0, password_rejected=0, key_authenticated=0,
                              direct=0, denied=0, exec=0, sftp=0, pty=0, shell=0,
                              active_transports=0, active_relays=0, reverse_bytes=0,
-                             relay_peak=0, halfclose_targets=0, windows=[], relays=[])
+                             relay_peak=0, halfclose_targets=0, windows=[], relays=[],
+                             keepalives=0, refused_during_outage=0)
         self.targets = {}
         for mode in ["echo", "tail", "reverse", "sink", "source", "delay", "deny", "cut"]:
             listener = self.listener()
@@ -108,6 +123,24 @@ class Fixture:
         for transport in transports:
             transport.close()
 
+    def check_idle_keepalive(self):
+        with self.lock:
+            transport = next((item for item in self.transports if item.is_authenticated()), None)
+        if transport is None:
+            return False
+        reply = threading.Event()
+
+        def request():
+            try:
+                transport.global_request("keepalive@openssh.com", wait=True)
+                if transport.is_active():
+                    reply.set()
+            except (OSError, EOFError):
+                pass
+
+        threading.Thread(target=request, daemon=True).start()
+        return reply.wait(1)
+
     def control_accept(self):
         while True:
             peer, _ = self.control.accept()
@@ -120,8 +153,18 @@ class Fixture:
                             self.key_index = 1 - self.key_index
                     elif command == "cut":
                         self.cut()
+                    elif command in ("outage", "resume"):
+                        with self.lock:
+                            self.outage = command == "outage"
+                        if self.outage:
+                            self.cut()
+                    elif command in ("silence_keepalive", "reply_keepalive"):
+                        self.silence_keepalive = command == "silence_keepalive"
+                    idle_reply = self.check_idle_keepalive() if command == "keepalive" else None
                     with self.lock:
                         stats = dict(self.counters)
+                    if idle_reply is not None:
+                        stats["idle_keepalive_reply"] = idle_reply
                     if command == "stacks":
                         frames = sys._current_frames()
                         stats["thread_stacks"] = [
@@ -135,10 +178,15 @@ class Fixture:
     def ssh_accept(self):
         while True:
             peer, _ = self.ssh_listener.accept()
+            with self.lock:
+                if self.outage:
+                    self.counters["refused_during_outage"] += 1
+                    peer.close()
+                    continue
             threading.Thread(target=self.ssh, args=(peer,), daemon=True).start()
 
     def ssh(self, peer):
-        transport = paramiko.Transport(peer, default_window_size=CAP, default_max_packet_size=CHUNK)
+        transport = FixtureTransport(peer, self)
         with self.lock:
             self.transports.append(transport)
             key = self.keys[self.key_index]
@@ -306,6 +354,11 @@ class Server(paramiko.ServerInterface):
             time.sleep(1.0)
         self.destinations[chanid] = destination
         return paramiko.OPEN_SUCCEEDED
+
+    def check_global_request(self, kind, msg):
+        if kind == "keepalive@openssh.com":
+            self.fixture.count("keepalives")
+        return False
 
     def check_channel_request(self, kind, chanid):
         if self.fixture.ui_sftp_rejection and kind == "session" and len(self.sessions) < 32:

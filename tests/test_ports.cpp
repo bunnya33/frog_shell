@@ -40,6 +40,15 @@ class PortsTests : public QObject {
         if(total>width)QVERIFY(panel.table->horizontalScrollBar()->maximum()>0);
     }
     quint16 unusedPort() {QTcpServer s;if(!s.listen(QHostAddress::LocalHost,0))return 0;return s.serverPort();}
+    QJsonObject control(const QByteArray &command) {
+        QTcpSocket socket;
+        socket.connectToHost(QHostAddress::LocalHost, quint16(fixture["control"].toInt()));
+        if (!socket.waitForConnected(2000)) return {};
+        socket.write(command + '\n');
+        QByteArray bytes;
+        while (!bytes.endsWith('\n') && socket.waitForReadyRead(2000)) bytes += socket.readAll();
+        return QJsonDocument::fromJson(bytes).object();
+    }
     bool exchange(quint16 port) {
         QTcpSocket socket;socket.connectToHost(QHostAddress::LocalHost,port);
         if(!QTest::qWaitFor([&]{return socket.state()==QAbstractSocket::ConnectedState;},8000))return false;
@@ -276,6 +285,39 @@ class PortsTests : public QObject {
         blocker.close();w.startPortRule(r.id);QTRY_COMPARE_WITH_TIMEOUT(w.portsPanel->state(r.id),QString("running"),20000);
         QVERIFY(loadTunnelRules(p.id).first().autoStart);w.stopTunnel(r.id);QTRY_VERIFY_WITH_TIMEOUT(!w.tunnelService,10000);
         applyTheme(false);
+    }
+    void loopbackReconnectsOnSamePortAfterOutage() {
+        if (!fixture.value("port").toInt()) QSKIP("Set RABBITSHELL_TUNNEL_FIXTURE using run_ports_integration.py");
+        const auto p = profile();
+        const auto r = rule(p.id, unusedPort(), quint16(fixture["targets"].toObject()["echo"].toInt()));
+        QVERIFY(r.localPort);
+        QVERIFY(saveTunnelRules(p.id, {r}));
+        Workspace w(p, QByteArray("fixture-only"), true);
+        w.demo = false;
+        QTimer trust;
+        answerTrust(trust);
+        w.startPortRule(r.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.portsPanel->state(r.id), QString("running"), 10000);
+        QVERIFY(exchange(r.localPort));
+        const auto before = control("outage");
+        QVERIFY(!before.isEmpty());
+        const auto resume = qScopeGuard([&] { control("resume"); });
+        QTRY_COMPARE_WITH_TIMEOUT(w.portsPanel->state(r.id), QString("reconnecting"), 3000);
+        QCOMPARE(w.tunnelCounts()->running, 0);
+        QTRY_VERIFY_WITH_TIMEOUT(control("stats")["refused_during_outage"].toInt() >=
+                                 before["refused_during_outage"].toInt() + 2, 8500);
+        QVERIFY(!control("resume").isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(w.portsPanel->state(r.id), QString("running"), 10000);
+        QVERIFY(exchange(r.localPort));
+        QVERIFY(!control("outage").isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(w.portsPanel->state(r.id), QString("reconnecting"), 3000);
+        w.portsPanel->toggleRule(r.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.portsPanel->state(r.id), QString("stopped"), 5000);
+        QVERIFY(!control("resume").isEmpty());
+        QTest::qWait(1200);
+        QCOMPARE(w.portsPanel->state(r.id), QString("stopped"));
+        QVERIFY(!w.portsPanel->rule(r.id)->autoStart);
+        QVERIFY(!w.tunnelService);
     }
     void loopbackSftpFailureCredentialsAndIndependentLifecycle() {
         if(!fixture.value("port").toInt())QSKIP("Set RABBITSHELL_TUNNEL_FIXTURE using run_ports_integration.py");

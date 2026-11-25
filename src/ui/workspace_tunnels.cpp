@@ -2,13 +2,15 @@
 #include "../core/operationgate.h"
 #include "workspace.h"
 #include "sshprompts.h"
+#include <algorithm>
 namespace rs {
 std::optional<TunnelCounts> Workspace::tunnelCounts() const { return portsPanel->tunnelCounts(); }
 int Workspace::tunnelCount() const {
     QSet<QString> ids=wantedTunnels;
     for(const auto &rule:portsPanel->rules()) {
         const auto state=portsPanel->state(rule.id);
-        if(state=="running" || state=="connecting" || state=="starting" || state=="stopping")ids.insert(rule.id);
+        if(state=="running" || state=="connecting" || state=="starting" || state=="stopping" ||
+           state=="unresponsive" || state=="reconnecting")ids.insert(rule.id);
     }
     return qMax(int(ids.size()),tunnelService?tunnelService->activeCount():0);
 }
@@ -71,32 +73,51 @@ void Workspace::queueTunnelStart(const TunnelRule &rule, bool manual) {
     wantedTunnels.insert(rule.id);queuedTunnelStarts.insert(rule.id,rule);
     portsPanel->setRuleState(rule.id,"connecting");emit stateChanged();ensureTunnels();
 }
-void Workspace::cancelQueuedTunnels(const QString &reason) {
-    const auto pending=queuedTunnelStarts.keys();queuedTunnelStarts.clear();
-    for(const auto &id:pending){restoringTunnels.remove(id);manualTunnelStarts.remove(id);wantedTunnels.remove(id);portsPanel->setRuleState(id,"failed",reason);}
+void Workspace::cancelQueuedTunnels(const QString &reason, bool preserveRecovery) {
+    const auto pending=queuedTunnelStarts.keys();
+    for(const auto &id:pending){
+        if (preserveRecovery && recoveringTunnels.contains(id)) {
+            portsPanel->setRuleState(id, "reconnecting", "解锁后继续恢复 SSH 转发");
+            continue;
+        }
+        queuedTunnelStarts.remove(id);
+        recoveringTunnels.remove(id);restoringTunnels.remove(id);manualTunnelStarts.remove(id);
+        wantedTunnels.remove(id);portsPanel->setRuleState(id,"failed",reason);
+    }
+    if (preserveRecovery) tunnelReconnectTimer.stop();
+    if(recoveringTunnels.isEmpty()){tunnelReconnectTimer.stop();tunnelReconnectDelaySeconds=1;}
     QTimer::singleShot(0,this,&Workspace::reportTunnelRestoreFailures);
     tunnelAuthRetry=false;emit stateChanged();
 }
 void Workspace::ensureTunnels() {
-    if(queuedTunnelStarts.isEmpty() || shuttingDown || tunnelRetiring)return;
+    if(queuedTunnelStarts.isEmpty() || shuttingDown || tunnelRetiring || tunnelReconnectTimer.isActive() ||
+       OperationGate::locked())return;
     const auto error=tunnelStartError();if(!error.isEmpty()){cancelQueuedTunnels(error);return;}
     if(preparingCredentials)return;
     if(!tunnelService) {
-        if(keyNeedsReview){promptCredential(false,true);return;}
+        const bool backgroundOnly=std::all_of(queuedTunnelStarts.keyBegin(),queuedTunnelStarts.keyEnd(),
+            [this](const QString &id){return recoveringTunnels.contains(id);});
+        if(keyNeedsReview){
+            if(backgroundOnly)cancelQueuedTunnels("请检查密钥，再手动启动转发。");
+            else promptCredential(false,true);
+            return;
+        }
         if(!credential && profile.authentication!="agent") {
             if(repository && rememberCredential && !passwordWasRejected) {
                 preparingCredentials=true;const auto generation=credentialGeneration;const auto lockEpoch=OperationGate::token();
                 for(const auto &id:queuedTunnelStarts.keys())portsPanel->setRuleState(id,"connecting","正在读取保存的凭据…");
-                repository->read(profile,this,[this,generation,lockEpoch](SecretResult result,quint64 token){
+                repository->read(profile,this,[this,generation,lockEpoch,backgroundOnly](SecretResult result,quint64 token){
                     if(!OperationGate::accepts(lockEpoch))return;preparingCredentials=false;
                     if(shuttingDown || queuedTunnelStarts.isEmpty())return;
                     if(!repository || repository->revision(profile.id)!=token || generation!=credentialGeneration || !tunnelStartError().isEmpty()) {
                         cancelQueuedTunnels("连接配置已变化，请重新启动转发。");return;
                     }
                     if(result.status==SecretResult::Found){credential=std::move(result.value);ensureTunnels();}
+                    else if(backgroundOnly)cancelQueuedTunnels("无法读取已保存的 SSH 凭据，请手动启动转发。");
                     else {if(result.status==SecretResult::Error)AppMessageBox::warning(this,"无法读取保存密码",result.error);promptCredential(false,true);}
                 });
-            } else promptCredential(false,true);
+            } else if(backgroundOnly)cancelQueuedTunnels("请重新输入 SSH 凭据，再启动转发。");
+            else promptCredential(false,true);
             return;
         }
         Profile target=profile;
@@ -107,8 +128,26 @@ void Workspace::ensureTunnels() {
     const auto pending=queuedTunnelStarts;queuedTunnelStarts.clear();
     for(auto it=pending.cbegin();it!=pending.cend();++it)
         if(wantedTunnels.contains(it.key()) && portsPanel->rule(it.key())) {
+            if (recoveringTunnels.contains(it.key()))
+                portsPanel->setRuleState(it.key(), "reconnecting", "正在重新连接 SSH");
             submittedTunnels.insert(it.key());submittedTunnelRules.insert(it.key(),it.value());tunnelService->startRule(it.value());
         }
+}
+void Workspace::scheduleTunnelReconnect() {
+    if (queuedTunnelStarts.isEmpty() || tunnelReconnectTimer.isActive() || shuttingDown || closing) return;
+    if (OperationGate::locked()) {
+        cancelQueuedTunnels("应用已锁定，请解锁后手动启动。", true);
+        return;
+    }
+    const auto error = tunnelStartError();
+    if (!error.isEmpty()) { cancelQueuedTunnels(error); return; }
+    const int delay = tunnelReconnectDelaySeconds;
+    tunnelReconnectDelaySeconds = qMin(60, delay * 2);
+    for (const auto &id : queuedTunnelStarts.keys()) {
+        if (!recoveringTunnels.contains(id)) continue;
+        portsPanel->setRuleState(id, "reconnecting", tunnelReconnectReason + QString("\n%1 秒后重试").arg(delay));
+    }
+    tunnelReconnectTimer.start(delay * 1000);
 }
 void Workspace::stopTunnel(const QString &id) {
     if(OperationGate::locked() || shuttingDown)return;
@@ -116,6 +155,14 @@ void Workspace::stopTunnel(const QString &id) {
     manualTunnelStarts.remove(id);restoringTunnels.remove(id);tunnelRestoreFailures.remove(id);
     QTimer::singleShot(0,this,&Workspace::reportTunnelRestoreFailures);
     queuedTunnelStarts.remove(id);wantedTunnels.remove(id);
+    recoveringTunnels.remove(id);
+    if (recoveringTunnels.isEmpty()) {
+        tunnelReconnectDelaySeconds = 1;
+        if (tunnelReconnectTimer.isActive()) {
+            tunnelReconnectTimer.stop();
+            QTimer::singleShot(0, this, &Workspace::ensureTunnels);
+        }
+    }
     if(tunnelService && submittedTunnels.contains(id)) {
         bool keep=false;for(const auto &submitted:submittedTunnels)if(wantedTunnels.contains(submitted)){keep=true;break;}
         if(tunnelService->activeCount()<=1 || !keep)tunnelRetiring=true;
@@ -137,6 +184,7 @@ void Workspace::restartTunnel(const TunnelRule &rule) {
 }
 void Workspace::stopTunnels() {
     const auto queued=queuedTunnelStarts.keys();queuedTunnelStarts.clear();wantedTunnels.clear();manualTunnelStarts.clear();
+    recoveringTunnels.clear();tunnelReconnectTimer.stop();tunnelReconnectDelaySeconds=1;
     restoringTunnels.clear();tunnelRestoreFailures.clear();tunnelAuthRetry=false;
     for(const auto &id:queued)if(portsPanel->state(id)!="running")portsPanel->setRuleState(id,"stopped");
     if(tunnelService){tunnelRetiring=true;tunnelService->stopAll();}
@@ -149,6 +197,15 @@ void Workspace::attachTunnels(TunnelService *service) {
     const bool remember=rememberCredential,shouldPersist=persistCredential;
     connect(service,&TunnelService::authenticated,this,[this,service,generation,token,attempted,remember,shouldPersist]{
         if(service!=tunnelService)return;
+        if (OperationGate::locked()) {
+            for (const auto &id : submittedTunnels)
+                if (recoveringTunnels.contains(id))
+                    if (const auto rule = portsPanel->rule(id)) queuedTunnelStarts[id] = *rule;
+            cancelQueuedTunnels("应用已锁定，请解锁后手动启动。", true);
+            tunnelRetiring = true;
+            service->stopAll();
+            return;
+        }
         if(shuttingDown || generation!=credentialGeneration || !tunnelStartError().isEmpty() ||
            (repository && token!=repository->revision(profile.id))) {
             cancelQueuedTunnels("连接配置或凭据已变化，转发未启动。");
@@ -164,14 +221,22 @@ void Workspace::attachTunnels(TunnelService *service) {
     });
     auto retry=[this,service,generation](bool key){
         if(service!=tunnelService || shuttingDown || generation!=credentialGeneration)return;
-        tunnelAuthRetry=true;
         if(key)keyNeedsReview=true;
         else {if(credential)credential->fill('\0');credential.reset();passwordWasRejected=true;++credentialGeneration;}
-        for(const auto &id:wantedTunnels)if(const auto rule=portsPanel->rule(id))queuedTunnelStarts[id]=*rule;
+        for (const auto &id : wantedTunnels) {
+            if (recoveringTunnels.contains(id)) continue;
+            if (const auto rule = portsPanel->rule(id)) queuedTunnelStarts[id] = *rule;
+        }
+        tunnelAuthRetry = !queuedTunnelStarts.isEmpty();
     };
     connect(service,&TunnelService::passwordRejected,this,[retry]{retry(false);});
     connect(service,&TunnelService::keyAuthenticationNeedsInput,this,[retry]{retry(true);});
     connect(service,&TunnelService::hostKey,this,[this,service,generation,token](const QString &fingerprint,bool changed){
+        if (!changed && !submittedTunnels.isEmpty() && std::all_of(submittedTunnels.cbegin(), submittedTunnels.cend(),
+            [this](const QString &id){return recoveringTunnels.contains(id);})) {
+            service->trust(false);
+            return;
+        }
         QPointer<TunnelService> guarded=service;
         requestHostTrust(this,profile,fingerprint,changed,[this,guarded,generation,token]{
             return guarded && guarded==tunnelService && !wantedTunnels.isEmpty() &&
@@ -182,13 +247,32 @@ void Workspace::attachTunnels(TunnelService *service) {
     connect(service,&TunnelService::ruleTraffic,this,[this,service](const QString &id,quint64,quint64,quint64 up,quint64 down){
         if(service==tunnelService && wantedTunnels.contains(id) && !shuttingDown)portsPanel->setRuleTraffic(id,up,down);
     });
+    connect(service, &TunnelService::transportLost, this, [this,service](const QString &reason) {
+        if (service != tunnelService || shuttingDown || closing ||
+            (!OperationGate::locked() && !tunnelStartError().isEmpty())) return;
+        tunnelReconnectReason = reason;
+        for (const auto &id : submittedTunnels) {
+            if (!wantedTunnels.contains(id) || queuedTunnelStarts.contains(id)) continue;
+            const auto state = portsPanel->state(id);
+            if (state != "running" && state != "unresponsive" && !recoveringTunnels.contains(id)) continue;
+            if (const auto rule = portsPanel->rule(id)) {
+                recoveringTunnels.insert(id);
+                queuedTunnelStarts[id] = *rule;
+                portsPanel->setRuleState(id, "reconnecting", reason);
+            }
+        }
+        if (!recoveringTunnels.isEmpty()) tunnelRetiring = true;
+    });
     connect(service,&TunnelService::ruleStateChanged,this,[this,service](const QString &id,const QString &state,const QString &reason){
         if(service!=tunnelService)return;
+        if ((state == "connecting" || state == "starting") && recoveringTunnels.contains(id)) return;
+        if (state == "failed" && OperationGate::locked() && recoveringTunnels.contains(id) && wantedTunnels.contains(id))
+            if (const auto rule = portsPanel->rule(id)) queuedTunnelStarts[id] = *rule;
         if(state=="running") {
             if(!wantedTunnels.contains(id) || queuedTunnelStarts.contains(id) || shuttingDown || tunnelRetiring) {
                 service->stopRule(id);return;
             }
-            if(portsPanel->state(id)!="running") {
+            if(portsPanel->state(id)!="running" && portsPanel->state(id)!="unresponsive") {
                 const auto current=portsPanel->rule(id);const auto submitted=submittedTunnelRules.constFind(id);
                 if(!current || submitted==submittedTunnelRules.cend() ||
                    current->localAddress!=submitted->localAddress || current->localPort!=submitted->localPort ||
@@ -197,13 +281,15 @@ void Workspace::attachTunnels(TunnelService *service) {
                     wantedTunnels.remove(id);manualTunnelStarts.remove(id);service->stopRule(id);return;
                 }
                 portsPanel->rememberEnabled(id,true);
+                if (recoveringTunnels.remove(id) && recoveringTunnels.isEmpty()) tunnelReconnectDelaySeconds = 1;
                 manualTunnelStarts.remove(id);
                 restoringTunnels.remove(id);QTimer::singleShot(0,this,&Workspace::reportTunnelRestoreFailures);
             }
         }
         if(state=="stopped" || state=="failed"){submittedTunnels.remove(id);submittedTunnelRules.remove(id);}
         if((state=="stopped" || state=="failed") && queuedTunnelStarts.contains(id) && wantedTunnels.contains(id)) {
-            portsPanel->setRuleState(id,"connecting",tunnelAuthRetry?"等待认证…":"正在应用新配置…");
+            if (!recoveringTunnels.contains(id))
+                portsPanel->setRuleState(id,"connecting",tunnelAuthRetry?"等待认证…":"正在应用新配置…");
             if(service->activeCount()>0 && !tunnelRetiring && !tunnelAuthRetry)QTimer::singleShot(0,this,&Workspace::ensureTunnels);
             else tunnelRetiring=true;
         } else {
@@ -213,7 +299,10 @@ void Workspace::attachTunnels(TunnelService *service) {
                 QTimer::singleShot(0,this,&Workspace::reportTunnelRestoreFailures);
             }
             portsPanel->setRuleState(id,state,reason);
-            if(state=="stopped" || state=="failed"){wantedTunnels.remove(id);manualTunnelStarts.remove(id);}
+            if(state=="stopped" || state=="failed"){
+                wantedTunnels.remove(id);manualTunnelStarts.remove(id);
+                if (recoveringTunnels.remove(id) && recoveringTunnels.isEmpty()) tunnelReconnectDelaySeconds=1;
+            }
             if(notify)showTunnelFailure(id,reason);
         }
         if((state=="stopped" || state=="failed") && service->activeCount()==0)tunnelRetiring=true;
@@ -226,6 +315,7 @@ void Workspace::attachTunnels(TunnelService *service) {
         if(shuttingDown)return;
         if(!queuedTunnelStarts.isEmpty()) {
             if(retry && !preparingCredentials)promptCredential(false,true);
+            else if (!recoveringTunnels.isEmpty()) scheduleTunnelReconnect();
             else QTimer::singleShot(0,this,&Workspace::ensureTunnels);
         }
     });

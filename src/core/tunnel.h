@@ -46,6 +46,7 @@ signals:
     void authenticated();
     void passwordRejected();
     void keyAuthenticationNeedsInput();
+    void transportLost(QString reason);
     void idle();
 
 private:

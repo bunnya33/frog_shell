@@ -557,6 +557,36 @@ private slots:
         QVERIFY(until([&] { return ready(sending); })); QCOMPARE(sending.get(), QByteArray("canceled"));
         QCOMPARE(h.states[good.id], "running"); QVERIFY(h.stop());
     }
+    void idleSshKeepaliveInBothDirections() {
+        if (fixture.isEmpty()) QSKIP("Set RABBITSHELL_TUNNEL_FIXTURE via run_tunnel_integration.py");
+        const auto before = control();
+        Harness h(profile);
+        const auto r = rule();
+        QVERIFY(h.start(r));
+        const auto idle = control("keepalive");
+        QVERIFY(idle["idle_keepalive_reply"].toBool());
+        QCOMPARE(idle["direct"], before["direct"]);
+        QVERIFY(until([&] { return control()["keepalives"].toInt() > before["keepalives"].toInt(); }, 25000));
+        QCOMPARE(control()["direct"], before["direct"]);
+        auto client = exchange(r.localPort, "after idle");
+        QVERIFY(until([&] { return ready(client); }));
+        QCOMPARE(client.get(), QByteArray("after idle"));
+        QVERIFY(h.stop());
+    }
+    void missingKeepaliveReportsOutage() {
+        if (fixture.isEmpty()) QSKIP("Set RABBITSHELL_TUNNEL_FIXTURE via run_tunnel_integration.py");
+        QVERIFY(!control("silence_keepalive").isEmpty());
+        const auto restore = qScopeGuard([&] { control("reply_keepalive"); });
+        Harness h(profile);
+        QSignalSpy lost(&h.service, &rs::TunnelService::transportLost);
+        const auto r = rule();
+        QVERIFY(h.start(r));
+        QVERIFY(until([&] { return h.states[r.id] == "unresponsive"; }, 48000));
+        QCOMPARE(lost.count(), 0);
+        QVERIFY(until([&] { return h.idle.count() == 1; }, 26000));
+        QCOMPARE(lost.count(), 1);
+        QCOMPARE(h.states[r.id], QString("failed"));
+    }
     void transportLossAndCancelOpening() {
         if (fixture.isEmpty()) QSKIP("Set RABBITSHELL_TUNNEL_FIXTURE via run_tunnel_integration.py");
         { Harness h(profile); auto a = rule(), b = rule("cut"); QVERIFY(h.start(a)); QVERIFY(h.start(b));

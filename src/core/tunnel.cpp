@@ -16,6 +16,7 @@
 #include <functional>
 #include <map>
 #include <cstddef>
+#include <utility>
 #ifdef Q_OS_WIN
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -29,9 +30,28 @@
 #include <unistd.h>
 #endif
 
+// Transport primitives from the statically linked libssh2 1.11.1. The public
+// channel APIs require a channel, and keepalive_send() discards EAGAIN.
+extern "C" {
+int _libssh2_transport_read(LIBSSH2_SESSION *session);
+int _libssh2_transport_send(LIBSSH2_SESSION *session, const unsigned char *data,
+                            size_t dataLength, const unsigned char *extra, size_t extraLength);
+int _libssh2_packet_askv(LIBSSH2_SESSION *session, const unsigned char *types,
+                        unsigned char **data, size_t *length, int matchOffset,
+                        const unsigned char *match, size_t matchLength);
+}
+static_assert(LIBSSH2_VERSION_NUM == 0x010b01, "Review the tunnel transport calls when updating libssh2");
+
 namespace rs {
 namespace {
 constexpr int Buffer = 64 * 1024, Chunk = 16 * 1024, WireBuffer = 128 * 1024;
+constexpr int ProbeIntervalMs = 20000;
+constexpr unsigned char KeepaliveRequest[] = "\x50\x00\x00\x00\x15keepalive@openssh.com\x01";
+constexpr unsigned char GlobalReplyTypes[] = {81, 82, 0};
+bool socketFailure(ssize_t code) {
+    return code == LIBSSH2_ERROR_SOCKET_SEND || code == LIBSSH2_ERROR_SOCKET_RECV ||
+           code == LIBSSH2_ERROR_SOCKET_DISCONNECT || code == LIBSSH2_ERROR_SOCKET_TIMEOUT;
+}
 constexpr int MaxRules = 64, MaxStoredRules = 1024, MaxConfig = 1024 * 1024;
 constexpr size_t SshBudget = 16 * 1024 * 1024;
 std::atomic_int globalStreams{0};
@@ -349,6 +369,7 @@ signals:
     void authenticated();
     void passwordRejected();
     void keyAuthenticationNeedsInput();
+    void transportLost(QString reason);
     void done();
 private:
     const quint64 startEpoch=OperationGate::token();
@@ -374,6 +395,7 @@ private:
     std::shared_ptr<TunnelMailbox> mailbox;
     QTcpSocket* socket = nullptr;
     QTimer* deadlineTimer = nullptr;
+    QTimer* probeTimer = nullptr;
     QElapsedTimer trafficClock;
     LIBSSH2_SESSION* ssh = nullptr;
     LIBSSH2_AGENT* agent = nullptr;
@@ -385,6 +407,8 @@ private:
     Stream* pinned = nullptr;
     QDeadlineTimer phaseDeadline;
     bool queued = false, pumping = false;
+    bool controlReadPending = false;
+    bool probeDue = false, probeSending = false, probeAwaiting = false, probeWarning = false;
     int readBudget = 0;
     size_t allocated = 0;
     struct alignas(std::max_align_t) Allocation { size_t bytes; };
@@ -437,6 +461,9 @@ private:
     void begin();
     void schedule();
     void pump();
+    void probeTick();
+    bool pumpControl();
+    void checkProbeReply();
     bool authenticate();
     bool step(Stream& stream);
     void accept(const QString& id, qintptr fd);
@@ -447,7 +474,7 @@ private:
     void startListeners();
     void reap();
     void armDeadline();
-    void finish(const QString& error = {});
+    void finish(const QString& error = {}, bool reconnect = false);
 };
 
 void TunnelWorker::add(const TunnelRule& value) {
@@ -488,9 +515,11 @@ void TunnelWorker::begin() {
     socket->setReadBufferSize(WireBuffer);
     deadlineTimer = new QTimer(this); deadlineTimer->setSingleShot(true);
     connect(deadlineTimer, &QTimer::timeout, this, [this] {
-        if (phase != Ready && phaseDeadline.hasExpired()) { finish("SSH 连接或认证超时"); return; }
+        if (phase != Ready && phaseDeadline.hasExpired()) {
+            finish("SSH 连接或认证超时", phase != Trust); return;
+        }
         for (const auto& s : streams) if ((s->op == Open || s->op == Free || s->cancel) && s->deadline.hasExpired()) {
-            finish("SSH 通道操作超时"); return;
+            finish("SSH 通道操作超时", true); return;
         }
         armDeadline();
     });
@@ -527,8 +556,10 @@ void TunnelWorker::begin() {
     });
     connect(socket, &QTcpSocket::readyRead, this, &TunnelWorker::schedule);
     connect(socket, &QTcpSocket::bytesWritten, this, &TunnelWorker::schedule);
-    connect(socket, &QTcpSocket::disconnected, this, [this] { if (phase != Dead) finish("SSH 连接已断开"); });
-    connect(socket, &QTcpSocket::errorOccurred, this, [this] { if (phase != Dead) finish("SSH 网络连接失败"); });
+    connect(socket, &QTcpSocket::disconnected, this, [this] { finish("SSH 连接已断开", phase != Trust); });
+    connect(socket, &QTcpSocket::errorOccurred, this, [this](QAbstractSocket::SocketError) {
+        if (phase != Dead) finish("SSH 网络连接失败：" + socket->errorString(), phase != Trust);
+    });
     phase = Connecting;
     phaseDeadline = QDeadlineTimer(qBound(3, profile.timeout, 60) * 1000);
     armDeadline();
@@ -587,6 +618,7 @@ bool TunnelWorker::authenticate() {
     if (rc == LIBSSH2_ERROR_EAGAIN) return false;
     wipe(secret);
     if (rc) {
+        if (socketFailure(rc)) { finish("SSH 认证期间连接中断", true); return false; }
         if (rc == LIBSSH2_ERROR_AUTHENTICATION_FAILED && profile.authentication == "password") emit passwordRejected();
         if (profile.authentication == "key" && socket->state() == QAbstractSocket::ConnectedState) emit keyAuthenticationNeedsInput();
         finish("SSH 认证失败"); return false;
@@ -594,8 +626,10 @@ bool TunnelWorker::authenticate() {
     if (agent) { libssh2_agent_disconnect(agent); libssh2_agent_free(agent); agent = nullptr; }
     phase = Ready;
     emit authenticated();
-    // TCP keepalive avoids libssh2 1.11.1 keepalive_send(), whose public
-    // implementation silently swallows EAGAIN and uses a transient packet.
+    probeTimer = new QTimer(this);
+    probeTimer->setInterval(ProbeIntervalMs);
+    connect(probeTimer, &QTimer::timeout, this, &TunnelWorker::probeTick);
+    probeTimer->start();
     startListeners(); armDeadline();
     return true;
 }
@@ -755,6 +789,7 @@ bool TunnelWorker::step(Stream& s) {
     if (operation == Open) {
         opening = nullptr;
         if (!s.channel) {
+            if (socketFailure(rc)) { finish("打开转发通道时 SSH 连接中断", true); return false; }
             if (!s.cancel && rules.contains(s.rule)) emit state(s.rule, "running", "SSH 服务器拒绝通道或目标连接失败");
             cancel(s); return true;
         }
@@ -764,10 +799,9 @@ bool TunnelWorker::step(Stream& s) {
     }
     if (operation == Free) { s.channel = nullptr; s.cancel = true; return true; }
     if (rc < 0) {
-        if (rc == LIBSSH2_ERROR_SOCKET_SEND || rc == LIBSSH2_ERROR_SOCKET_RECV ||
-            rc == LIBSSH2_ERROR_SOCKET_DISCONNECT || rc == LIBSSH2_ERROR_ALLOC ||
+        if (socketFailure(rc) || rc == LIBSSH2_ERROR_ALLOC ||
             rc == LIBSSH2_ERROR_PROTO || rc == LIBSSH2_ERROR_DECRYPT) {
-            finish("SSH 传输失败或资源上限已触发"); return false;
+            finish("SSH 传输失败或资源上限已触发", socketFailure(rc)); return false;
         }
         cancel(s); return true;
     }
@@ -786,6 +820,59 @@ void TunnelWorker::schedule() {
     queued = true;
     QMetaObject::invokeMethod(this, [this] { queued = false; pump(); }, Qt::QueuedConnection);
 }
+void TunnelWorker::probeTick() {
+    if (probeDue || probeAwaiting) {
+        if (probeWarning) { finish("SSH 保活连续 40 秒未收到回复", true); return; }
+        probeWarning = true;
+        for (const auto& [id, rule] : rules)
+            if (!rule.stopping) emit state(id, "unresponsive", "正在等待 SSH 保活回复");
+        return;
+    }
+    probeDue = true;
+    schedule();
+}
+void TunnelWorker::checkProbeReply() {
+    if (!probeAwaiting) return;
+    unsigned char *reply = nullptr;
+    size_t length = 0;
+    if (_libssh2_packet_askv(ssh, GlobalReplyTypes, &reply, &length, 0, nullptr, 0) != 0) return;
+    libssh2_free(ssh, reply);
+    probeAwaiting = false;
+    probeTimer->start();
+    if (!std::exchange(probeWarning, false)) return;
+    for (const auto& [id, rule] : rules)
+        if (!rule.stopping && rule.listener) emit state(id, "running", {});
+}
+bool TunnelWorker::pumpControl() {
+    if (!probeSending && (streams.empty() || controlReadPending)) {
+        // readyRead must pump SSH even when no local client has opened a channel.
+        // Resume a suspended reply before any forwarding API writes a packet.
+        int rc = 0;
+        for (int packets = 0; packets < 32; ++packets) {
+            rc = _libssh2_transport_read(ssh);
+            if (rc <= 0) break;
+        }
+        if (rc < 0 && rc != LIBSSH2_ERROR_EAGAIN) {
+            finish(QString("读取 SSH 控制消息失败（%1）").arg(rc), socketFailure(rc));
+            return false;
+        }
+        controlReadPending = rc == LIBSSH2_ERROR_EAGAIN &&
+                             (libssh2_session_block_directions(ssh) & LIBSSH2_SESSION_BLOCK_OUTBOUND);
+        if (controlReadPending) return false;
+        if (rc > 0 || !readBudget) schedule();
+    }
+    checkProbeReply();
+    if (!probeDue) return true;
+    const int rc = _libssh2_transport_send(ssh, KeepaliveRequest, sizeof(KeepaliveRequest) - 1, nullptr, 0);
+    if (rc == LIBSSH2_ERROR_EAGAIN) { probeSending = true; return false; }
+    if (rc != 0) {
+        finish(QString("发送 SSH 保活失败（%1）").arg(rc), socketFailure(rc));
+        return false;
+    }
+    probeSending = probeDue = false;
+    probeAwaiting = true;
+    return true;
+}
 void TunnelWorker::pump() {
     if (pumping || phase == Dead || phase == Connecting || phase == Trust) return;
     pumping = true;
@@ -797,7 +884,7 @@ void TunnelWorker::pump() {
             if (!readBudget && socket->bytesAvailable()) schedule();
             return;
         }
-        if (rc) { finish("SSH 握手失败"); return; }
+        if (rc) { finish("SSH 握手失败", socketFailure(rc)); return; }
         const auto result = sshtrust::check(ssh, profile);
         if (result.status == sshtrust::Result::Error) {
             finish("主机身份校验失败：" + result.reason); return;
@@ -816,6 +903,7 @@ void TunnelWorker::pump() {
         return;
     }
     if (phase != Ready) return;
+    if (!pinned && !pumpControl()) return;
     bool progress = false;
     for (int round = 0; round < 8 && phase == Ready; ++round) {
         bool advanced = false;
@@ -829,10 +917,11 @@ void TunnelWorker::pump() {
         }
         progress |= advanced;
         reap();
+        if (phase == Ready) checkProbeReply();
         if (!advanced || pinned) break;
     }
     if (phase == Ready && !pinned &&
-        (progress || readBudget < WireBuffer)) schedule();
+        (progress || readBudget < WireBuffer || (probeDue && !probeSending))) schedule();
 }
 void TunnelWorker::reap() {
     std::erase_if(streams, [&](const auto& s) {
@@ -875,7 +964,7 @@ void TunnelWorker::armDeadline() {
     }
     if (needed) deadlineTimer->start(int(remaining)); else deadlineTimer->stop();
 }
-void TunnelWorker::finish(const QString& error) {
+void TunnelWorker::finish(const QString& error, bool reconnect) {
     if (phase == Dead) return;
     {
         QMutexLocker lock(&mailbox->mutex);
@@ -883,6 +972,7 @@ void TunnelWorker::finish(const QString& error) {
     }
     phase = Dead;
     if (deadlineTimer) deadlineTimer->stop();
+    if (probeTimer) probeTimer->stop();
     for (auto& [id, rule] : rules) { delete rule.listener; rule.listener = nullptr; }
     for (auto& s : streams) { s->cancel = true; closeLocal(*s); }
     if (socket) socket->abort();
@@ -896,6 +986,10 @@ void TunnelWorker::finish(const QString& error) {
             auto* pending = pinned;
             step(*pending);
             pinned = nullptr;
+        } else if (probeSending) {
+            _libssh2_transport_send(ssh, KeepaliveRequest, sizeof(KeepaliveRequest) - 1, nullptr, 0);
+        } else if (controlReadPending) {
+            _libssh2_transport_read(ssh);
         }
         libssh2_session_set_blocking(ssh, 0);
         int rc = libssh2_session_free(ssh);
@@ -904,6 +998,7 @@ void TunnelWorker::finish(const QString& error) {
     }
     globalStreams.fetch_sub(int(streams.size())); streams.clear(); opening = pinned = nullptr;
     wipe(secret);
+    if (reconnect) emit transportLost(error);
     for (const auto& [id, rule] : rules) emit state(id, error.isEmpty() ? "stopped" : "failed", error);
     rules.clear();
     Q_ASSERT(allocated == 0);
@@ -977,6 +1072,7 @@ void TunnelService::startRule(const TunnelRule& rule) {
         connect(worker, &TunnelWorker::authenticated, this, &TunnelService::authenticated);
         connect(worker, &TunnelWorker::passwordRejected, this, &TunnelService::passwordRejected);
         connect(worker, &TunnelWorker::keyAuthenticationNeedsInput, this, &TunnelService::keyAuthenticationNeedsInput);
+        connect(worker, &TunnelWorker::transportLost, this, &TunnelService::transportLost);
         // Delete the worker in its live event loop, then quit. finished/idle
         // therefore cannot overtake worker/socket destruction.
         connect(worker, &TunnelWorker::done, worker, &QObject::deleteLater);

@@ -191,6 +191,10 @@ class Workspace : public QWidget {
     QHash<QString,TunnelRule> submittedTunnelRules;
     QSet<QString> wantedTunnels, submittedTunnels, manualTunnelStarts;
     QSet<QString> restoringTunnels;
+    QSet<QString> recoveringTunnels;
+    QTimer tunnelReconnectTimer;
+    int tunnelReconnectDelaySeconds = 1;
+    QString tunnelReconnectReason;
     QHash<QString,QString> tunnelRestoreFailures;
     bool tunnelRetiring = false, tunnelAuthRetry = false, connectionAutoStarted = false;
     std::optional<QByteArray> credential;
@@ -362,8 +366,9 @@ class Workspace : public QWidget {
     void stopTunnel(const QString &id);
     void restartTunnel(const TunnelRule &rule);
     void stopTunnels();
-    void cancelQueuedTunnels(const QString &reason);
+    void cancelQueuedTunnels(const QString &reason, bool preserveRecovery = false);
     void attachTunnels(TunnelService *service);
+    void scheduleTunnelReconnect();
     void navigate(const QString &path, bool historical = false);
     void renderDirectory(const QVariantMap &result, int id);
     void syncParentNavigation();
